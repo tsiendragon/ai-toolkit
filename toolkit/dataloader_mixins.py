@@ -926,6 +926,11 @@ class ControlFileItemDTOMixin:
         self.has_control_image = False
         self.control_path: Union[str, List[str], None] = None
         self.control_tensor: Union[torch.Tensor, None] = None
+        # Control latent caching attributes
+        self._control_latent_path: Union[str, None] = None
+        self._control_encoded_latent: Union[torch.Tensor, None] = None
+        self.is_control_latent_cached = False
+        self.is_caching_control_latents_to_disk = False
         dataset_config: 'DatasetConfig' = kwargs.get('dataset_config', None)
         self.full_size_control_images = False
         if dataset_config.control_path is not None:
@@ -967,9 +972,14 @@ class ControlFileItemDTOMixin:
                 print_acc(f"Error loading image: {control_path}")
 
             if not self.full_size_control_images:
-                # we just scale them to 512x512:
-                w, h = img.size
-                img = img.resize((512, 512), Image.BICUBIC)
+                # Check if customized_shape is specified, use it instead of default 512x512
+                if self.dataset_config.customized_shape is not None:
+                    target_width, target_height = self.dataset_config.customized_shape
+                    img = img.resize((target_width, target_height), Image.BICUBIC)
+                else:
+                    # Default fallback to 512x512
+                    w, h = img.size
+                    img = img.resize((512, 512), Image.BICUBIC)
 
             else:
                 w, h = img.size
@@ -1047,6 +1057,97 @@ class ControlFileItemDTOMixin:
 
     def cleanup_control(self: 'FileItemDTO'):
         self.control_tensor = None
+        # Clean up control latent cache
+        if self._control_encoded_latent is not None:
+            if not self.is_caching_control_latents_to_disk:
+                # we are not caching to disk, so remove from memory
+                self._control_encoded_latent = None
+            else:
+                # move it back to cpu
+                self._control_encoded_latent = self._control_encoded_latent.to('cpu')
+
+    def get_control_latent_info_dict(self: 'FileItemDTO'):
+        """Generate a dictionary for control latent cache key"""
+        import json
+        item = {}
+        item["control_path"] = self.control_path
+        item["crop_width"] = self.crop_width
+        item["crop_height"] = self.crop_height
+        item["scale_to_width"] = self.scale_to_width
+        item["scale_to_height"] = self.scale_to_height
+        item["crop_x"] = self.crop_x
+        item["crop_y"] = self.crop_y
+        if hasattr(self, 'latent_space_version'):
+            item["latent_space_version"] = self.latent_space_version
+
+        if self.flip_x:
+            item["flip_x"] = True
+        if self.flip_y:
+            item["flip_y"] = True
+        return item
+
+    def get_control_latent_path(self: 'FileItemDTO', recalculate=False):
+        """Get the path for cached control latent"""
+        import os
+        import json
+        import hashlib
+        import base64
+
+        if self._control_latent_path is not None and not recalculate:
+            return self._control_latent_path
+        else:
+            # Store control latents in a folder in same path as control image called _control_latent_cache
+            if isinstance(self.control_path, str):
+                control_dir = os.path.dirname(self.control_path)
+                filename_no_ext = os.path.splitext(os.path.basename(self.control_path))[0]
+            else:
+                # If multiple control paths, use the first one for cache directory
+                control_dir = os.path.dirname(self.control_path[0])
+                filename_no_ext = os.path.splitext(os.path.basename(self.control_path[0]))[0]
+
+            latent_dir = os.path.join(control_dir, '_control_latent_cache')
+            hash_dict = self.get_control_latent_info_dict()
+            # get base64 hash of md5 checksum of hash_dict
+            hash_input = json.dumps(hash_dict, sort_keys=True).encode('utf-8')
+            hash_str = base64.urlsafe_b64encode(hashlib.md5(hash_input).digest()).decode('ascii')
+            hash_str = hash_str.replace('=', '')
+            self._control_latent_path = os.path.join(latent_dir, f'{filename_no_ext}_control_{hash_str}.safetensors')
+
+        return self._control_latent_path
+
+    def get_control_latent(self: 'FileItemDTO', device=None):
+        """Get cached control latent"""
+        from safetensors.torch import load_file
+
+        if not self.is_control_latent_cached:
+            return None
+        if self._control_encoded_latent is None:
+            # load it from disk
+            state_dict = load_file(
+                self.get_control_latent_path(),
+                device='cpu'
+            )
+            self._control_encoded_latent = state_dict['control_latent']
+        return self._control_encoded_latent
+
+    def save_control_latent(self: 'FileItemDTO', control_latent: torch.Tensor):
+        """Save control latent to disk cache"""
+        import os
+        from safetensors.torch import save_file
+
+        if not self.is_caching_control_latents_to_disk:
+            return
+
+        latent_path = self.get_control_latent_path(recalculate=True)
+        os.makedirs(os.path.dirname(latent_path), exist_ok=True)
+
+        # Save to disk
+        state_dict = {'control_latent': control_latent.to('cpu')}
+        save_file(state_dict, latent_path)
+        self.is_control_latent_cached = True
+
+        # Also keep in memory if caching to disk
+        self._control_encoded_latent = control_latent.to('cpu')
 
 
 class ClipImageFileItemDTOMixin:
@@ -1957,14 +2058,28 @@ class LatentCachingMixin:
 
                         # 记录第一次缓存时的图像形状 - by Tsien at 2025-08-18
                         if i == 0:
+                            expected_shape = file_item.dataset_config.customized_shape if file_item.dataset_config.customized_shape else "dynamic"
                             print_acc(f"[FIRST_CACHE] 第一张图像形状记录:")
                             print_acc(f"[FIRST_CACHE] - 图像文件: {file_item.path}")
+                            print_acc(f"[FIRST_CACHE] - 预期图像尺寸 (customized_shape): {expected_shape}")
                             print_acc(f"[FIRST_CACHE] - 原始图像尺寸: {file_item.crop_width}x{file_item.crop_height}")
                             print_acc(f"[FIRST_CACHE] - 图像tensor形状 (BCHW): {imgs.shape}")
                             print_acc(f"[FIRST_CACHE] - 图像tensor数据类型: {imgs.dtype}")
                             print_acc(f"[FIRST_CACHE] - 图像tensor设备: {imgs.device}")
 
+                        # Debug logging for every image tensor before VAE encoding
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.debug(f"[IMAGE_CACHE] 图像 {i}: {file_item.path}")
+                        logger.debug(f"[IMAGE_CACHE] - 输入tensor形状 (BCHW): {imgs.shape}")
+                        logger.debug(f"[IMAGE_CACHE] - 输入tensor数据类型: {imgs.dtype}")
+
                         latent = self.sd.encode_images(imgs).squeeze(0)
+
+                        # Debug logging for every latent after VAE encoding
+                        logger.debug(f"[IMAGE_CACHE] - 输出latent形状 (CHW): {latent.shape}")
+                        logger.debug(f"[IMAGE_CACHE] - 输出latent数据类型: {latent.dtype}")
+                        logger.debug(f"[IMAGE_CACHE] - VAE压缩比例: {imgs.shape[2]}x{imgs.shape[3]} -> {latent.shape[1]}x{latent.shape[2]} ({imgs.shape[2]//latent.shape[1]}x压缩)")
 
                         # 记录第一次缓存时的潜在向量形状 - by Tsien at 2025-08-18
                         if i == 0:
@@ -2324,3 +2439,119 @@ class ControlCachingMixin:
             self.control_generator = None
 
             flush()
+
+    def cache_control_latents_all(self: 'AiToolkitDataset'):
+        """Cache control image latents to disk for faster training"""
+        if self.dataset_config.num_frames > 1:
+            raise Exception("Error: caching control latents is not supported for multi-frame datasets")
+
+        # Only cache if we have control images
+        if not any(hasattr(item, 'has_control_image') and item.has_control_image for item in self.file_list):
+            print_acc("No control images found, skipping control latent caching")
+            return
+
+        with accelerator.main_process_first():
+            print_acc(f"Caching control latents for {self.dataset_path}")
+            print_acc(" - Saving control latents to disk")
+
+            # move sd items to cpu except for vae
+            self.sd.set_device_state_preset('cache_latents')
+
+            # use tqdm to show progress
+            i = 0
+            for file_item in tqdm(self.file_list, desc='Caching Control Latents'):
+                # Skip if no control image
+                if not (hasattr(file_item, 'has_control_image') and file_item.has_control_image):
+                    continue
+
+                # set latent space version
+                if self.sd.model_config.latent_space_version is not None:
+                    file_item.latent_space_version = self.sd.model_config.latent_space_version
+                elif self.sd.is_xl:
+                    file_item.latent_space_version = 'sdxl'
+                elif self.sd.is_v3:
+                    file_item.latent_space_version = 'sd3'
+                elif self.sd.is_auraflow:
+                    file_item.latent_space_version = 'sdxl'
+                elif self.sd.is_flux:
+                    file_item.latent_space_version = 'flux1'
+                elif self.sd.model_config.is_pixart_sigma:
+                    file_item.latent_space_version = 'sdxl'
+                else:
+                    file_item.latent_space_version = self.sd.model_config.arch
+
+                file_item.is_caching_control_latents_to_disk = True
+
+                control_latent_path = file_item.get_control_latent_path(recalculate=True)
+                # check if it is saved to disk already
+                if os.path.exists(control_latent_path):
+                    file_item.is_control_latent_cached = True
+                    i += 1
+                    continue
+                else:
+                    # not saved to disk, calculate
+                    # load the control image first
+                    file_item.load_control_image()
+                    if file_item.control_tensor is None:
+                        print_acc(f"Warning: Control tensor is None for {file_item.path}")
+                        continue
+
+                    dtype = self.sd.torch_dtype
+                    device = self.sd.device_torch
+
+                    try:
+                        # Prepare control tensor for encoding - convert from 0-1 to -1,1 range
+                        control_tensor = file_item.control_tensor.unsqueeze(0) if file_item.control_tensor.dim() == 3 else file_item.control_tensor
+                        control_tensor = control_tensor * 2 - 1
+                        control_tensor = control_tensor.to(device, dtype=dtype)
+
+                        # Record first control image caching details
+                        if i == 0:
+                            expected_shape = file_item.dataset_config.customized_shape if file_item.dataset_config.customized_shape else [512, 512]
+                            print_acc(f"[FIRST_CONTROL_CACHE] 第一张控制图像缓存记录:")
+                            print_acc(f"[FIRST_CONTROL_CACHE] - 控制图像文件: {file_item.control_path}")
+                            print_acc(f"[FIRST_CONTROL_CACHE] - 预期图像尺寸 (customized_shape): {expected_shape}")
+                            print_acc(f"[FIRST_CONTROL_CACHE] - 控制图像tensor形状 (BCHW): {control_tensor.shape}")
+                            print_acc(f"[FIRST_CONTROL_CACHE] - 控制图像tensor数据类型: {control_tensor.dtype}")
+                            print_acc(f"[FIRST_CONTROL_CACHE] - 控制图像tensor设备: {control_tensor.device}")
+
+                        # Debug logging for every control image tensor before VAE encoding
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.debug(f"[CONTROL_CACHE] 控制图像 {i}: {file_item.control_path}")
+                        logger.debug(f"[CONTROL_CACHE] - 输入tensor形状 (BCHW): {control_tensor.shape}")
+                        logger.debug(f"[CONTROL_CACHE] - 输入tensor数据类型: {control_tensor.dtype}")
+                        logger.debug(f"[CONTROL_CACHE] - 输入tensor值范围: [{control_tensor.min():.3f}, {control_tensor.max():.3f}]")
+
+                        # Encode control image to latent
+                        control_latent = self.sd.encode_images(control_tensor).squeeze(0)
+
+                        # Debug logging for every control latent after VAE encoding
+                        logger.debug(f"[CONTROL_CACHE] - 输出latent形状 (CHW): {control_latent.shape}")
+                        logger.debug(f"[CONTROL_CACHE] - 输出latent数据类型: {control_latent.dtype}")
+                        logger.debug(f"[CONTROL_CACHE] - 输出latent值范围: [{control_latent.min():.3f}, {control_latent.max():.3f}]")
+                        logger.debug(f"[CONTROL_CACHE] - VAE压缩比例: {control_tensor.shape[2]}x{control_tensor.shape[3]} -> {control_latent.shape[1]}x{control_latent.shape[2]} ({control_tensor.shape[2]//control_latent.shape[1]}x压缩)")
+
+                        # Record first control latent details
+                        if i == 0:
+                            print_acc(f"[FIRST_CONTROL_CACHE] - 控制潜在向量形状 (CHW): {control_latent.shape}")
+                            print_acc(f"[FIRST_CONTROL_CACHE] - 控制潜在向量数据类型: {control_latent.dtype}")
+                            print_acc(f"[FIRST_CONTROL_CACHE] - 控制潜在向量设备: {control_latent.device}")
+                            print_acc(f"[FIRST_CONTROL_CACHE] - 控制图像压缩比例: 图像{control_tensor.shape[2]}x{control_tensor.shape[3]} -> 潜在向量{control_latent.shape[1]}x{control_latent.shape[2]} (8x压缩)")
+                            print_acc(f"[FIRST_CONTROL_CACHE] 第一张控制图像缓存记录完成")
+
+                        # Save to disk
+                        file_item.save_control_latent(control_latent)
+
+                        del control_latent
+                        del file_item.control_tensor
+
+                    except Exception as e:
+                        print_acc(f"Error caching control latent for {file_item.path}: {e}")
+                        continue
+
+                i += 1
+
+            # restore device state
+            self.sd.restore_device_state()
+            print_acc(f"Control latent caching completed for {i} files")

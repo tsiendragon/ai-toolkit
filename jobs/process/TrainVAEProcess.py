@@ -1131,10 +1131,21 @@ class TrainVAEProcess(BaseTrainProcess):
                                     log_losses[key] = sum(log_losses[key]) / (len(log_losses[key]) + 1e-6)
                                     # if log_losses[key] > 0:
                                     self.writer.add_scalar(f"loss/{key}", log_losses[key], self.step_num)
+                                # 刷新TensorBoard数据到磁盘 - by Tsien at 2025-01-27
+                                self.flush_tensorboard()
                         # reset log losses
                         log_losses = copy.deepcopy(blank_losses)
 
                 self.step_num += 1
+                # 每个step结束时刷新TensorBoard数据 - by Tsien at 2025-01-27
+                if self.writer is not None:
+                    should_log = True
+                    if hasattr(self, 'accelerator') and hasattr(self.accelerator, 'is_main_process'):
+                        should_log = self.accelerator.is_main_process
+                    if should_log:
+                        self.flush_tensorboard()
+                        # 记录GPU模块状态 - by Tsien at 2025-01-27
+                        self.log_gpu_module_state(self.step_num)
             # end epoch
             if self.writer is not None:
                 # 检查是否为主进程（分布式训练安全检查）- by Tsien at 2025-08-18
@@ -1149,7 +1160,11 @@ class TrainVAEProcess(BaseTrainProcess):
                         epoch_losses[key] = sum(log_losses[key]) / (len(log_losses[key]) + eps)
                         if epoch_losses[key] > 0:
                             self.writer.add_scalar(f"epoch loss/{key}", epoch_losses[key], epoch)
+                    # 刷新TensorBoard数据到磁盘 - by Tsien at 2025-01-27
+                    self.flush_tensorboard()
             # reset epoch losses
             epoch_losses = copy.deepcopy(blank_losses)
 
         self.save()
+        # 清理TensorBoard资源 - by Tsien at 2025-01-27
+        self.cleanup_tensorboard()

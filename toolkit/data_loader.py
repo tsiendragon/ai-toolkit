@@ -403,6 +403,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         self.is_caching_latents = dataset_config.cache_latents or dataset_config.cache_latents_to_disk
         self.is_caching_latents_to_memory = dataset_config.cache_latents
         self.is_caching_latents_to_disk = dataset_config.cache_latents_to_disk
+        self.is_caching_control_latents_to_disk = dataset_config.cache_control_latents_to_disk
         self.is_caching_clip_vision_to_disk = dataset_config.cache_clip_vision_to_disk
         self.is_generating_controls = len(dataset_config.controls) > 0
         self.epoch_num = 0
@@ -577,6 +578,10 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             if self.is_caching_latents:
                 logger.info(f"🔍 [SETUP_EPOCH] 缓存 latents")
                 self.cache_latents_all_latents()
+
+            if self.is_caching_control_latents_to_disk:
+                logger.info(f"🔍 [SETUP_EPOCH] 缓存 control latents")
+                self.cache_control_latents_all()
 
             if self.is_caching_clip_vision_to_disk:
                 logger.info(f"🔍 [SETUP_EPOCH] 缓存 CLIP vision")

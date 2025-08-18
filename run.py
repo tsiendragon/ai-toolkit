@@ -23,7 +23,8 @@ import argparse
 from toolkit.job import get_job
 from toolkit.accelerator import get_accelerator
 from toolkit.print import print_acc, setup_log_to_file
-
+import logging
+# logging.basicConfig(level=logging.DEBUG)
 accelerator = get_accelerator()
 
 
@@ -68,7 +69,7 @@ def main():
         default=None,
         help='Name to replace [name] tag in config file, useful for shared config file'
     )
-    
+
     parser.add_argument(
         '-l', '--log',
         type=str,
@@ -76,7 +77,7 @@ def main():
         help='Log file to write output to'
     )
     args = parser.parse_args()
-    
+
     if args.log is not None:
         setup_log_to_file(args.log)
 

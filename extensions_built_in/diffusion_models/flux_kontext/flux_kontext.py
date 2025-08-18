@@ -395,28 +395,67 @@ class FluxKontextModel(BaseModel):
         with torch.no_grad():
             control_tensor = batch.control_tensor
             if control_tensor is not None:
-                self.vae.to(self.device_torch)
+                control_latent = None
 
-                # Debug logging - log original shapes from dataloader
+                # Check if we have cached control latents first
+                if hasattr(batch.file_items[0], 'is_control_latent_cached') and batch.file_items[0].is_control_latent_cached:
+                    # Use cached control latents
+                    cached_control_latents = []
+                    for file_item in batch.file_items:
+                        cached_latent = file_item.get_control_latent(device=latents.device)
+                        if cached_latent is not None:
+                            cached_control_latents.append(cached_latent.to(latents.device, latents.dtype))
 
+                    if len(cached_control_latents) > 0:
+                        control_latent = torch.stack(cached_control_latents, dim=0)
+                        # Debug logging for cached control latents
+                        # print_acc(f"[FLUX_KONTEXT] Using cached control latents: {control_latent.shape}")
 
-                # we are not packed here, so we just need to pass them so we can pack them later
-                control_tensor = control_tensor * 2 - 1
-                control_tensor = control_tensor.to(self.vae_device_torch, dtype=self.torch_dtype)
+                # If no cached control latents available, encode control tensor
+                if control_latent is None:
+                    self.vae.to(self.device_torch)
 
-                # if it is not the size of batch.tensor, (bs,ch,h,w) then we need to resize it
-                if batch.tensor is not None:
-                    target_h, target_w = batch.tensor.shape[2], batch.tensor.shape[3]
+                    # Debug logging - log original shapes from dataloader
+                    import logging
+                    logger = logging.getLogger(__name__)
+
+                    # we are not packed here, so we just need to pass them so we can pack them later
+                    control_tensor = control_tensor * 2 - 1
+                    control_tensor = control_tensor.to(self.vae_device_torch, dtype=self.torch_dtype)
+
+                    # if it is not the size of batch.tensor, (bs,ch,h,w) then we need to resize it
+                    if batch.tensor is not None:
+                        target_h, target_w = batch.tensor.shape[2], batch.tensor.shape[3]
+                    else:
+                        # When caching latents, batch.tensor is None. We get the size from the file_items instead.
+                        target_h = batch.file_items[0].crop_height
+                        target_w = batch.file_items[0].crop_width
+
+                    # Debug logging before resize
+                    logger.debug(f"[FLUX_KONTEXT_ENCODE] Control tensor 处理前形状: {control_tensor.shape}")
+                    logger.debug(f"[FLUX_KONTEXT_ENCODE] Target size: {target_h}x{target_w}")
+
+                    if control_tensor.shape[2] != target_h or control_tensor.shape[3] != target_w:
+                        logger.debug(f"[FLUX_KONTEXT_ENCODE] 需要resize: {control_tensor.shape[2]}x{control_tensor.shape[3]} -> {target_h}x{target_w}")
+                        control_tensor = F.interpolate(control_tensor, size=(target_h, target_w), mode='bilinear')
+                        logger.debug(f"[FLUX_KONTEXT_ENCODE] Resize后形状: {control_tensor.shape}")
+
+                    # Debug logging before VAE encoding
+                    logger.debug(f"[FLUX_KONTEXT_ENCODE] VAE编码前: tensor形状={control_tensor.shape}, 数据类型={control_tensor.dtype}")
+                    logger.debug(f"[FLUX_KONTEXT_ENCODE] VAE编码前: 值范围=[{control_tensor.min():.3f}, {control_tensor.max():.3f}]")
+
+                    control_latent = self.encode_images(control_tensor).to(latents.device, latents.dtype)
+
+                    # Debug logging for encoded control latents
+                    logger.debug(f"[FLUX_KONTEXT_ENCODE] VAE编码后: latent形状={control_latent.shape}, 数据类型={control_latent.dtype}")
+                    logger.debug(f"[FLUX_KONTEXT_ENCODE] VAE编码后: 值范围=[{control_latent.min():.3f}, {control_latent.max():.3f}]")
+                    logger.debug(f"[FLUX_KONTEXT_ENCODE] 压缩比例: {control_tensor.shape[2]}x{control_tensor.shape[3]} -> {control_latent.shape[2]}x{control_latent.shape[3]} ({control_tensor.shape[2]//control_latent.shape[2]}x压缩)")
                 else:
-                    # When caching latents, batch.tensor is None. We get the size from the file_items instead.
-                    target_h = batch.file_items[0].crop_height
-                    target_w = batch.file_items[0].crop_width
-
-
-                if control_tensor.shape[2] != target_h or control_tensor.shape[3] != target_w:
-                    control_tensor = F.interpolate(control_tensor, size=(target_h, target_w), mode='bilinear')
-
-                control_latent = self.encode_images(control_tensor).to(latents.device, latents.dtype)
+                    # Debug logging for cached control latents
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.debug(f"[FLUX_KONTEXT_CACHED] 使用缓存control latent: 形状={control_latent.shape}, 数据类型={control_latent.dtype}")
+                    logger.debug(f"[FLUX_KONTEXT_CACHED] 缓存latent值范围: [{control_latent.min():.3f}, {control_latent.max():.3f}]")
 
                 try:
                     latents = torch.cat((latents, control_latent), dim=1)

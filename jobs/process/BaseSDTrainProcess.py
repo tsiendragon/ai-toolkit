@@ -483,9 +483,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
         pass
 
     def done_hook(self):
+        # 清理TensorBoard资源 - by Tsien at 2025-01-27
+        self.cleanup_tensorboard()
         pass
 
     def end_step_hook(self):
+        # 每个step结束时刷新TensorBoard数据 - by Tsien at 2025-01-27
+        if self.accelerator.is_main_process:
+            self.flush_tensorboard()
+            # 记录GPU模块状态 - by Tsien at 2025-01-27
+            self.log_gpu_module_state(self.step_num)
         pass
 
     def save(self, step=None):
@@ -2322,6 +2329,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             except Exception as e:
                                                 print(f"⚠️ [IMAGE_LOG] 图像记录失败: {e}")
 
+                                    # 刷新TensorBoard数据到磁盘 - by Tsien at 2025-01-27
+                                    self.flush_tensorboard()
+
                                 if self.progress_bar is not None:
                                     self.progress_bar.unpause()
 
@@ -2388,6 +2398,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if self.accelerator.is_main_process:
             self.save()
             self.logger.finish()
+            # 清理TensorBoard资源 - by Tsien at 2025-01-27
+            self.cleanup_tensorboard()
         self.accelerator.end_training()
 
         if self.accelerator.is_main_process:

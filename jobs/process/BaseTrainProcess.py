@@ -72,6 +72,29 @@ class BaseTrainProcess(BaseProcess):
             summary_dir = os.path.join(self.log_dir, summary_name)
             self.writer = SummaryWriter(summary_dir)
 
+    def flush_tensorboard(self):
+        """刷新TensorBoard数据到磁盘 - by Tsien at 2025-01-27"""
+        if self.writer is not None:
+            self.writer.flush()
+
+    def log_gpu_module_state(self, step: int):
+        """记录GPU模块状态到TensorBoard - by Tsien at 2025-01-27"""
+        if self.writer is not None:
+            from toolkit.gpu_module_monitor import log_gpu_module_state_to_tensorboard, log_gpu_memory_to_tensorboard
+            try:
+                # 传递self作为model_instance，让监控函数自动检测模型类型
+                log_gpu_module_state_to_tensorboard(self.writer, self, step)
+                log_gpu_memory_to_tensorboard(self.writer, step)
+            except Exception as e:
+                print(f"⚠️ [GPU_MODULE_MONITOR] GPU模块状态记录失败: {e}")
+
+    def cleanup_tensorboard(self):
+        """清理TensorBoard资源 - by Tsien at 2025-01-27"""
+        if self.writer is not None:
+            self.writer.flush()
+            self.writer.close()
+            self.writer = None
+
     def save_training_config(self):
         os.makedirs(self.save_root, exist_ok=True)
         save_dif = os.path.join(self.save_root, f'config.yaml')
