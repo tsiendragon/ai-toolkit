@@ -125,6 +125,8 @@ def log_training_images(
     """
     在 TensorBoard 中记录训练图像和控制图像
 
+    重要：此函数应该只在主进程(rank-0)中调用，以避免分布式训练中的冲突
+
     Args:
         writer: TensorBoard SummaryWriter
         batch: 训练批次数据
@@ -133,6 +135,11 @@ def log_training_images(
         tag_prefix: 标签前缀
     """
     try:
+        # 安全检查：避免非主进程记录日志 - by Tsien at 2025-08-18
+        import os
+        local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        if local_rank != 0:
+            return  # 非主进程直接返回，不记录日志
         # 获取训练图像
         training_images = None
         if batch.tensor is not None:
@@ -196,6 +203,8 @@ def log_individual_images(
     """
     记录单个图像对（便于详细查看）
 
+    重要：此函数应该只在主进程(rank-0)中调用，以避免分布式训练中的冲突
+
     Args:
         writer: TensorBoard SummaryWriter
         batch: 训练批次数据
@@ -203,6 +212,11 @@ def log_individual_images(
         max_images: 最大记录图像数量
     """
     try:
+        # 安全检查：避免非主进程记录日志 - by Tsien at 2025-08-18
+        import os
+        local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        if local_rank != 0:
+            return  # 非主进程直接返回，不记录日志
         training_images = batch.tensor if batch.tensor is not None else None
         control_images = batch.control_tensor if hasattr(batch, 'control_tensor') and batch.control_tensor is not None else None
 

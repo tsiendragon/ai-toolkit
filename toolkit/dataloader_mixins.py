@@ -1870,10 +1870,81 @@ class LatentCachingMixin:
                 latent_path = file_item.get_latent_path(recalculate=True)
                 # check if it is saved to disk already
                 if os.path.exists(latent_path):
+                    need_regenerate = False
                     if to_memory:
                         # load it into memory
                         state_dict = load_file(latent_path, device='cpu')
-                        file_item._encoded_latent = state_dict['latent'].to('cpu', dtype=self.sd.torch_dtype)
+                        cached_latent = state_dict['latent'].to('cpu', dtype=self.sd.torch_dtype)
+
+                        # 验证 latent 尺寸是否正确 [16, w//8, h//8]
+                        expected_h = file_item.crop_height // 8
+                        expected_w = file_item.crop_width // 8
+                        expected_shape = [16, expected_h, expected_w]
+
+                        if list(cached_latent.shape) != expected_shape:
+                            print_acc(f"[LATENT_SIZE_CHECK] 检测到缓存的latent尺寸不正确: {file_item.path}")
+                            print_acc(f"[LATENT_SIZE_CHECK] 当前latent形状: {cached_latent.shape}")
+                            print_acc(f"[LATENT_SIZE_CHECK] 期望latent形状: {expected_shape}")
+                            print_acc(f"[LATENT_SIZE_CHECK] 图片尺寸: {file_item.crop_width}x{file_item.crop_height}")
+                            print_acc(f"[LATENT_SIZE_CHECK] 将重新生成latent...")
+                            need_regenerate = True
+                        else:
+                            file_item._encoded_latent = cached_latent
+
+                    if need_regenerate:
+                        # 删除错误的缓存文件并重新生成
+                        print_acc(f"[LATENT_REGEN] 删除错误的latent缓存文件: {latent_path}")
+                        os.remove(latent_path)
+
+                        # 重新生成latent（使用下面的生成逻辑）
+                        file_item.load_and_process_image(self.transform, only_load_latents=True)
+                        dtype = self.sd.torch_dtype
+                        device = self.sd.device_torch
+                        try:
+                            imgs = file_item.tensor.unsqueeze(0).to(device, dtype=dtype)
+
+                            # 记录第一次缓存时的图像形状（重新生成分支） - by Tsien at 2025-08-18
+                            if i == 0:
+                                print_acc(f"[FIRST_CACHE_REGEN] 第一张图像形状记录 (重新生成):")
+                                print_acc(f"[FIRST_CACHE_REGEN] - 图像文件: {file_item.path}")
+                                print_acc(f"[FIRST_CACHE_REGEN] - 原始图像尺寸: {file_item.crop_width}x{file_item.crop_height}")
+                                print_acc(f"[FIRST_CACHE_REGEN] - 图像tensor形状 (BCHW): {imgs.shape}")
+                                print_acc(f"[FIRST_CACHE_REGEN] - 图像tensor数据类型: {imgs.dtype}")
+                                print_acc(f"[FIRST_CACHE_REGEN] - 图像tensor设备: {imgs.device}")
+
+                            latent = self.sd.encode_images(imgs).squeeze(0)
+
+                            # 记录第一次缓存时的潜在向量形状（重新生成分支） - by Tsien at 2025-08-18
+                            if i == 0:
+                                print_acc(f"[FIRST_CACHE_REGEN] - 潜在向量形状 (CHW): {latent.shape}")
+                                print_acc(f"[FIRST_CACHE_REGEN] - 潜在向量数据类型: {latent.dtype}")
+                                print_acc(f"[FIRST_CACHE_REGEN] - 潜在向量设备: {latent.device}")
+                                print_acc(f"[FIRST_CACHE_REGEN] - 压缩比例: 图像{imgs.shape[2]}x{imgs.shape[3]} -> 潜在向量{latent.shape[1]}x{latent.shape[2]} (8x压缩)")
+                                print_acc(f"[FIRST_CACHE_REGEN] 第一张图像形状记录完成 (重新生成)")
+                            else:
+                                print_acc(f"[LATENT_REGEN] 重新生成的latent形状: {latent.shape}")
+
+                        except Exception as e:
+                            print_acc(f"Error processing image: {file_item.path}")
+                            print_acc(f"Error: {str(e)}")
+                            raise e
+
+                        # 保存新的latent
+                        if to_disk:
+                            state_dict = OrderedDict([
+                                ('latent', latent.clone().detach().cpu()),
+                            ])
+                            meta = get_meta_for_safetensors(file_item.get_latent_info_dict())
+                            os.makedirs(os.path.dirname(latent_path), exist_ok=True)
+                            save_file(state_dict, latent_path, metadata=meta)
+                            print_acc(f"[LATENT_REGEN] 已保存重新生成的latent到: {latent_path}")
+
+                        if to_memory:
+                            file_item._encoded_latent = latent.to('cpu', dtype=self.sd.torch_dtype)
+
+                        del imgs
+                        del latent
+                        del file_item.tensor
                 else:
                     # not saved to disk, calculate
                     # load the image first
@@ -1883,7 +1954,26 @@ class LatentCachingMixin:
                     # add batch dimension
                     try:
                         imgs = file_item.tensor.unsqueeze(0).to(device, dtype=dtype)
+
+                        # 记录第一次缓存时的图像形状 - by Tsien at 2025-08-18
+                        if i == 0:
+                            print_acc(f"[FIRST_CACHE] 第一张图像形状记录:")
+                            print_acc(f"[FIRST_CACHE] - 图像文件: {file_item.path}")
+                            print_acc(f"[FIRST_CACHE] - 原始图像尺寸: {file_item.crop_width}x{file_item.crop_height}")
+                            print_acc(f"[FIRST_CACHE] - 图像tensor形状 (BCHW): {imgs.shape}")
+                            print_acc(f"[FIRST_CACHE] - 图像tensor数据类型: {imgs.dtype}")
+                            print_acc(f"[FIRST_CACHE] - 图像tensor设备: {imgs.device}")
+
                         latent = self.sd.encode_images(imgs).squeeze(0)
+
+                        # 记录第一次缓存时的潜在向量形状 - by Tsien at 2025-08-18
+                        if i == 0:
+                            print_acc(f"[FIRST_CACHE] - 潜在向量形状 (CHW): {latent.shape}")
+                            print_acc(f"[FIRST_CACHE] - 潜在向量数据类型: {latent.dtype}")
+                            print_acc(f"[FIRST_CACHE] - 潜在向量设备: {latent.device}")
+                            print_acc(f"[FIRST_CACHE] - 压缩比例: 图像{imgs.shape[2]}x{imgs.shape[3]} -> 潜在向量{latent.shape[1]}x{latent.shape[2]} (8x压缩)")
+                            print_acc(f"[FIRST_CACHE] 第一张图像形状记录完成")
+
                     except Exception as e:
                         print_acc(f"Error processing image: {file_item.path}")
                         print_acc(f"Error: {str(e)}")

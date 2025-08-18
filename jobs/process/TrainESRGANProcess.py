@@ -633,24 +633,37 @@ class TrainESRGANProcess(BaseTrainProcess):
 
                     if self.log_every and self.step_num % self.log_every == 0:
                         # log to tensorboard
+                        # ESRGAN训练通常为单GPU，但为了一致性添加主进程检查 - by Tsien at 2025-08-18
                         if self.writer is not None:
-                            # get avg loss
-                            for key in log_losses:
-                                log_losses[key] = sum(log_losses[key]) / (len(log_losses[key]) + 1e-6)
-                                # if log_losses[key] > 0:
-                                self.writer.add_scalar(f"loss/{key}", log_losses[key], self.step_num)
+                            # 检查是否为主进程（分布式训练安全检查）
+                            should_log = True
+                            if hasattr(self, 'accelerator') and hasattr(self.accelerator, 'is_main_process'):
+                                should_log = self.accelerator.is_main_process
+
+                            if should_log:
+                                # get avg loss
+                                for key in log_losses:
+                                    log_losses[key] = sum(log_losses[key]) / (len(log_losses[key]) + 1e-6)
+                                    # if log_losses[key] > 0:
+                                    self.writer.add_scalar(f"loss/{key}", log_losses[key], self.step_num)
                         # reset log losses
                         log_losses = copy.deepcopy(blank_losses)
 
                 self.step_num += 1
             # end epoch
             if self.writer is not None:
-                eps = 1e-6
-                # get avg loss
-                for key in epoch_losses:
-                    epoch_losses[key] = sum(log_losses[key]) / (len(log_losses[key]) + eps)
-                    if epoch_losses[key] > 0:
-                        self.writer.add_scalar(f"epoch loss/{key}", epoch_losses[key], epoch)
+                # 检查是否为主进程（分布式训练安全检查）- by Tsien at 2025-08-18
+                should_log = True
+                if hasattr(self, 'accelerator') and hasattr(self.accelerator, 'is_main_process'):
+                    should_log = self.accelerator.is_main_process
+
+                if should_log:
+                    eps = 1e-6
+                    # get avg loss
+                    for key in epoch_losses:
+                        epoch_losses[key] = sum(log_losses[key]) / (len(log_losses[key]) + eps)
+                        if epoch_losses[key] > 0:
+                            self.writer.add_scalar(f"epoch loss/{key}", epoch_losses[key], epoch)
             # reset epoch losses
             epoch_losses = copy.deepcopy(blank_losses)
 
