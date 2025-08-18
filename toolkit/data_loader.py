@@ -420,6 +420,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         # we always random crop if random scale is enabled
         self.random_crop = self.random_scale if self.random_scale else dataset_config.random_crop
         self.resolution = dataset_config.resolution
+        self.customized_shape = dataset_config.customized_shape  # [width, height] for fixed shape training
         self.caption_dict = None
         self.file_list: List['FileItemDTO'] = []
 
@@ -677,9 +678,15 @@ def get_dataloader_from_datasets(
     for dataset_option in dataset_options:
         if isinstance(dataset_option, DatasetConfig):
             config_to_add = dataset_option
-            # 如果是分布式训练，创建一个副本并禁用 buckets
-            if is_distributed_training and config_to_add.buckets:
-                logger.info(f"🔧 [DISTRIBUTED] 数据集 {config_to_add.folder_path} 原本启用 buckets，现禁用以支持分布式训练")
+            # 如果是分布式训练或有定制化形状，创建一个副本并禁用 buckets
+            needs_bucket_disable = (is_distributed_training and config_to_add.buckets) or \
+                                   (config_to_add.customized_shape is not None and config_to_add.buckets)
+
+            if needs_bucket_disable:
+                if is_distributed_training:
+                    logger.info(f"🔧 [DISTRIBUTED] 数据集 {config_to_add.folder_path} 原本启用 buckets，现禁用以支持分布式训练")
+                if config_to_add.customized_shape is not None:
+                    logger.info(f"🔧 [CUSTOMIZED_SHAPE] 数据集 {config_to_add.folder_path} 原本启用 buckets，现禁用以支持固定形状训练 {config_to_add.customized_shape}")
                 # 创建配置副本并禁用 buckets
                 config_dict = config_to_add.__dict__.copy()
                 config_dict['buckets'] = False
@@ -690,9 +697,15 @@ def get_dataloader_from_datasets(
             split_configs = preprocess_dataset_raw_config([dataset_option])
             for x in split_configs:
                 config_dict = x.copy()
-                # 如果是分布式训练，禁用 buckets
-                if is_distributed_training and config_dict.get('buckets', True):
-                    logger.info(f"🔧 [DISTRIBUTED] 数据集 {config_dict.get('folder_path', 'unknown')} 原本启用 buckets，现禁用以支持分布式训练")
+                # 如果是分布式训练或有定制化形状，禁用 buckets
+                needs_bucket_disable = (is_distributed_training and config_dict.get('buckets', True)) or \
+                                       (config_dict.get('customized_shape') is not None and config_dict.get('buckets', True))
+
+                if needs_bucket_disable:
+                    if is_distributed_training:
+                        logger.info(f"🔧 [DISTRIBUTED] 数据集 {config_dict.get('folder_path', 'unknown')} 原本启用 buckets，现禁用以支持分布式训练")
+                    if config_dict.get('customized_shape') is not None:
+                        logger.info(f"🔧 [CUSTOMIZED_SHAPE] 数据集 {config_dict.get('folder_path', 'unknown')} 原本启用 buckets，现禁用以支持固定形状训练 {config_dict.get('customized_shape')}")
                     config_dict['buckets'] = False
                 dataset_config_list.append(DatasetConfig(**config_dict))
 

@@ -738,28 +738,55 @@ class ImageProcessingDTOMixin:
 
             # img = transforms.CenterCrop((self.crop_height, self.crop_width))(img)
         else:
-            # Downscale the source image first
-            # TODO this is nto right
-            img = img.resize(
-                (int(img.size[0] * self.dataset_config.scale), int(img.size[1] * self.dataset_config.scale)),
-                Image.BICUBIC)
-            min_img_size = min(img.size)
-            if self.dataset_config.random_crop:
-                if self.dataset_config.random_scale and min_img_size > self.dataset_config.resolution:
-                    if min_img_size < self.dataset_config.resolution:
-                        print_acc(
-                            f"Unexpected values: min_img_size={min_img_size}, self.resolution={self.dataset_config.resolution}, image file={self.path}")
-                        scale_size = self.dataset_config.resolution
-                    else:
-                        scale_size = random.randint(self.dataset_config.resolution, int(min_img_size))
-                    scaler = scale_size / min_img_size
-                    scale_width = int((img.width + 5) * scaler)
-                    scale_height = int((img.height + 5) * scaler)
-                    img = img.resize((scale_width, scale_height), Image.BICUBIC)
-                img = transforms.RandomCrop(self.dataset_config.resolution)(img)
+            # Check if customized_shape is specified for fixed shape training
+            if self.dataset_config.customized_shape is not None:
+                # Use fixed shape training: resize to exact [width, height]
+                target_width, target_height = self.dataset_config.customized_shape
+
+                # Calculate scale to fit the target size while maintaining aspect ratio
+                scale_w = target_width / img.size[0]
+                scale_h = target_height / img.size[1]
+
+                if self.dataset_config.random_crop:
+                    # Use the smaller scale to ensure the image fits within target size, then crop
+                    scale = max(scale_w, scale_h)
+                    new_width = int(img.size[0] * scale)
+                    new_height = int(img.size[1] * scale)
+                    img = img.resize((new_width, new_height), Image.BICUBIC)
+
+                    # Random crop to exact target size
+                    img = transforms.RandomCrop((target_height, target_width))(img)
+                else:
+                    # Use the larger scale to cover the target size, then center crop
+                    scale = max(scale_w, scale_h)
+                    new_width = int(img.size[0] * scale)
+                    new_height = int(img.size[1] * scale)
+                    img = img.resize((target_width, target_height), Image.BICUBIC)
+
+                    # Center crop to exact target size
             else:
-                img = transforms.CenterCrop(min_img_size)(img)
-                img = img.resize((self.dataset_config.resolution, self.dataset_config.resolution), Image.BICUBIC)
+                # Original logic for resolution-based processing
+                # Downscale the source image first
+                img = img.resize(
+                    (int(img.size[0] * self.dataset_config.scale), int(img.size[1] * self.dataset_config.scale)),
+                    Image.BICUBIC)
+                min_img_size = min(img.size)
+                if self.dataset_config.random_crop:
+                    if self.dataset_config.random_scale and min_img_size > self.dataset_config.resolution:
+                        if min_img_size < self.dataset_config.resolution:
+                            print_acc(
+                                f"Unexpected values: min_img_size={min_img_size}, self.resolution={self.dataset_config.resolution}, image file={self.path}")
+                            scale_size = self.dataset_config.resolution
+                        else:
+                            scale_size = random.randint(self.dataset_config.resolution, int(min_img_size))
+                        scaler = scale_size / min_img_size
+                        scale_width = int((img.width + 5) * scaler)
+                        scale_height = int((img.height + 5) * scaler)
+                        img = img.resize((scale_width, scale_height), Image.BICUBIC)
+                    img = transforms.RandomCrop(self.dataset_config.resolution)(img)
+                else:
+                    img = transforms.CenterCrop(min_img_size)(img)
+                    img = img.resize((self.dataset_config.resolution, self.dataset_config.resolution), Image.BICUBIC)
 
         if self.augments is not None and len(self.augments) > 0:
             # do augmentations
@@ -848,7 +875,29 @@ class InpaintControlFileItemDTOMixin:
                     self.crop_y + self.crop_height
                 ))
             else:
-                raise Exception("Inpaint images not supported for non-bucket datasets")
+                # Check if customized_shape is specified for fixed shape training
+                if self.dataset_config.customized_shape is not None:
+                    # Use fixed shape training: resize to exact [width, height]
+                    target_width, target_height = self.dataset_config.customized_shape
+
+                    # Calculate scale to fit the target size while maintaining aspect ratio
+                    scale_w = target_width / img.size[0]
+                    scale_h = target_height / img.size[1]
+
+                    if self.dataset_config.random_crop:
+                        # Use the smaller scale to ensure the image fits within target size, then crop
+                        scale = max(scale_w, scale_h)
+                        new_width = int(img.size[0] * scale)
+                        new_height = int(img.size[1] * scale)
+                        img = img.resize((new_width, new_height), Image.BICUBIC)
+
+                        # Random crop to exact target size
+                        img = transforms.RandomCrop((target_height, target_width))(img)
+                    else:
+                        img = img.resize((target_width, target_height), Image.BICUBIC)
+
+                else:
+                    raise Exception("Inpaint images not supported for non-bucket datasets without customized_shape")
 
             transform = transforms.Compose([
                 transforms.ToTensor(),
@@ -952,7 +1001,34 @@ class ControlFileItemDTOMixin:
                         self.crop_y + self.crop_height
                     ))
                 else:
-                    raise Exception("Control images not supported for non-bucket datasets")
+                    # Check if customized_shape is specified for fixed shape training
+                    if self.dataset_config.customized_shape is not None:
+                        # Use fixed shape training: resize to exact [width, height]
+                        target_width, target_height = self.dataset_config.customized_shape
+
+                        # Calculate scale to fit the target size while maintaining aspect ratio
+                        scale_w = target_width / img.size[0]
+                        scale_h = target_height / img.size[1]
+
+                        if self.dataset_config.random_crop:
+                            # Use the smaller scale to ensure the image fits within target size, then crop
+                            scale = max(scale_w, scale_h)
+                            new_width = int(img.size[0] * scale)
+                            new_height = int(img.size[1] * scale)
+                            img = img.resize((new_width, new_height), Image.BICUBIC)
+
+                            # Random crop to exact target size
+                            img = transforms.RandomCrop((target_height, target_width))(img)
+                        else:
+                            # Use the larger scale to cover the target size, then center crop
+                            scale = max(scale_w, scale_h)
+                            new_width = int(img.size[0] * scale)
+                            new_height = int(img.size[1] * scale)
+                            img = img.resize((target_width, target_height), Image.BICUBIC)
+
+
+                    else:
+                        raise Exception("Control images not supported for non-bucket datasets without customized_shape")
             transform = transforms.Compose([
                 transforms.ToTensor(),
             ])
@@ -1471,7 +1547,35 @@ class UnconditionalFileItemDTOMixin:
                 self.crop_y + self.crop_height
             ))
         else:
-            raise Exception("Unconditional images are not supported for non-bucket datasets")
+            # Check if customized_shape is specified for fixed shape training
+            if self.dataset_config.customized_shape is not None:
+                # Use fixed shape training: resize to exact [width, height]
+                target_width, target_height = self.dataset_config.customized_shape
+
+                # Calculate scale to fit the target size while maintaining aspect ratio
+                scale_w = target_width / img.size[0]
+                scale_h = target_height / img.size[1]
+
+                if self.dataset_config.random_crop:
+                    # Use the smaller scale to ensure the image fits within target size, then crop
+                    scale = max(scale_w, scale_h)
+                    new_width = int(img.size[0] * scale)
+                    new_height = int(img.size[1] * scale)
+                    img = img.resize((new_width, new_height), Image.BICUBIC)
+
+                    # Random crop to exact target size
+                    img = transforms.RandomCrop((target_height, target_width))(img)
+                else:
+                    # Use the larger scale to cover the target size, then center crop
+                    scale = max(scale_w, scale_h)
+                    new_width = int(img.size[0] * scale)
+                    new_height = int(img.size[1] * scale)
+                    img = img.resize((target_width, target_height), Image.BICUBIC)
+
+                    # Center crop to exact target size
+                    # img = transforms.CenterCrop((target_height, target_width))(img)
+            else:
+                raise Exception("Unconditional images are not supported for non-bucket datasets without customized_shape")
 
         if self.aug_replay_spatial_transforms:
             self.unconditional_tensor = self.augment_spatial_control(img, transform=self.unconditional_transforms)

@@ -750,8 +750,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
             logger.info(f"🔍 [DISTRIBUTED] - 当前进程: {self.accelerator.process_index}")
             logger.info(f"🔍 [DISTRIBUTED] - 设备: {self.accelerator.device}")
             logger.info(f"🔍 [DISTRIBUTED] - even_batches: {self.accelerator.even_batches}")
-            print(f"🔍 [DISTRIBUTED] - 准备前 dataset 大小: {len(self.data_loader.dataset)}")
-            1/0
             if hasattr(self, 'data_loader') and self.data_loader is not None:
                 logger.info(f"🔍 [DISTRIBUTED] 准备主数据加载器")
                 logger.info(f"🔍 [DISTRIBUTED] - 准备前 DataLoader 长度: {len(self.data_loader)}")
