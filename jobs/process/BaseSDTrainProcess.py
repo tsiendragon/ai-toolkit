@@ -705,6 +705,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     def prepare_accelerator(self):
         # set some config
+        import logging
+        logger = logging.getLogger(__name__)
+
         self.accelerator.even_batches=False
 
         # # prepare all the models stuff for accelerator (hopefully we dont miss any)
@@ -742,9 +745,33 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         # Distributed training support - by Tsien at 2025-08-18
         if getattr(self.train_config, 'distributed_training', False):
+            logger.info(f"🔍 [DISTRIBUTED] 启用分布式训练支持")
+            logger.info(f"🔍 [DISTRIBUTED] - 进程数: {self.accelerator.num_processes}")
+            logger.info(f"🔍 [DISTRIBUTED] - 当前进程: {self.accelerator.process_index}")
+            logger.info(f"🔍 [DISTRIBUTED] - 设备: {self.accelerator.device}")
+            logger.info(f"🔍 [DISTRIBUTED] - even_batches: {self.accelerator.even_batches}")
+            print(f"🔍 [DISTRIBUTED] - 准备前 dataset 大小: {len(self.data_loader.dataset)}")
+            1/0
             if hasattr(self, 'data_loader') and self.data_loader is not None:
+                logger.info(f"🔍 [DISTRIBUTED] 准备主数据加载器")
+                logger.info(f"🔍 [DISTRIBUTED] - 准备前 DataLoader 长度: {len(self.data_loader)}")
+                logger.info(f"🔍 [DISTRIBUTED] - 准备前 batch_size: {getattr(self.data_loader, 'batch_size', 'None')}")
+                logger.info(f"🔍 [DISTRIBUTED] - 准备前 dataset 大小: {len(self.data_loader.dataset)}")
+
                 self.data_loader = self.accelerator.prepare(self.data_loader)
+
+                logger.info(f"🔍 [DISTRIBUTED] - 准备后 DataLoader 长度: {len(self.data_loader)}")
+                logger.info(f"🔍 [DISTRIBUTED] - 准备后 DataLoader 类型: {type(self.data_loader)}")
+
+                # 检查分布式环境下的采样器
+                if hasattr(self.data_loader, 'batch_sampler'):
+                    batch_sampler = getattr(self.data_loader, 'batch_sampler', None)
+                    logger.info(f"🔍 [DISTRIBUTED] - batch_sampler: {type(batch_sampler) if batch_sampler else 'None'}")
+                    if batch_sampler is None:
+                        logger.error(f"❌ [DISTRIBUTED] batch_sampler 为 None！这会导致 'NoneType' object is not iterable 错误")
+
             if hasattr(self, 'data_loader_reg') and self.data_loader_reg is not None:
+                logger.info(f"🔍 [DISTRIBUTED] 准备正则化数据加载器")
                 self.data_loader_reg = self.accelerator.prepare(self.data_loader_reg)
 
 
@@ -1966,11 +1993,30 @@ class BaseSDTrainProcess(BaseTrainProcess):
         ### HOOk ###
         self.before_dataset_load()
         # load datasets if passed in the root process
+        import logging
+        logger = logging.getLogger(__name__)
+
+        logger.info(f"🔍 [TRAIN_PROCESS] 开始加载数据集")
+        logger.info(f"🔍 [TRAIN_PROCESS] - train_config.batch_size: {self.train_config.batch_size}")
+        logger.info(f"🔍 [TRAIN_PROCESS] - datasets 数量: {len(self.datasets) if self.datasets else 0}")
+        logger.info(f"🔍 [TRAIN_PROCESS] - datasets_reg 数量: {len(self.datasets_reg) if self.datasets_reg else 0}")
+
         if self.datasets is not None:
+            logger.info(f"🔍 [TRAIN_PROCESS] 创建主训练数据加载器")
             self.data_loader = get_dataloader_from_datasets(self.datasets, self.train_config.batch_size, self.sd)
+            if self.data_loader:
+                logger.info(f"🔍 [TRAIN_PROCESS] - 主数据加载器创建成功，长度: {len(self.data_loader)}")
+                logger.info(f"🔍 [TRAIN_PROCESS] - 数据集总大小: {len(self.data_loader.dataset)}")
+            else:
+                logger.warning(f"⚠️ [TRAIN_PROCESS] 主数据加载器创建失败")
+
         if self.datasets_reg is not None:
-            self.data_loader_reg = get_dataloader_from_datasets(self.datasets_reg, self.train_config.batch_size,
-                                                                self.sd)
+            logger.info(f"🔍 [TRAIN_PROCESS] 创建正则化数据加载器")
+            self.data_loader_reg = get_dataloader_from_datasets(self.datasets_reg, self.train_config.batch_size, self.sd)
+            if self.data_loader_reg:
+                logger.info(f"🔍 [TRAIN_PROCESS] - 正则化数据加载器创建成功，长度: {len(self.data_loader_reg)}")
+            else:
+                logger.warning(f"⚠️ [TRAIN_PROCESS] 正则化数据加载器创建失败")
 
         flush()
         self.last_save_step = self.step_num
@@ -2000,19 +2046,38 @@ class BaseSDTrainProcess(BaseTrainProcess):
         else:
             self.progress_bar = None
 
+        logger.info(f"🔍 [TRAIN_LOOP] 初始化数据迭代器")
+
         if self.data_loader is not None:
             dataloader = self.data_loader
-            dataloader_iterator = iter(dataloader)
+            logger.info(f"🔍 [TRAIN_LOOP] - 主数据加载器长度: {len(dataloader)}")
+            logger.info(f"🔍 [TRAIN_LOOP] - 主数据加载器类型: {type(dataloader)}")
+
+            try:
+                dataloader_iterator = iter(dataloader)
+                logger.info(f"🔍 [TRAIN_LOOP] - 主数据迭代器创建成功")
+            except Exception as e:
+                logger.error(f"❌ [TRAIN_LOOP] 创建主数据迭代器失败: {e}")
+                logger.error(f"❌ [TRAIN_LOOP] DataLoader batch_sampler: {getattr(dataloader, 'batch_sampler', 'None')}")
+                raise
         else:
             dataloader = None
             dataloader_iterator = None
+            logger.warning(f"⚠️ [TRAIN_LOOP] 主数据加载器为 None")
 
         if self.data_loader_reg is not None:
             dataloader_reg = self.data_loader_reg
-            dataloader_iterator_reg = iter(dataloader_reg)
+            logger.info(f"🔍 [TRAIN_LOOP] - 正则化数据加载器长度: {len(dataloader_reg)}")
+            try:
+                dataloader_iterator_reg = iter(dataloader_reg)
+                logger.info(f"🔍 [TRAIN_LOOP] - 正则化数据迭代器创建成功")
+            except Exception as e:
+                logger.error(f"❌ [TRAIN_LOOP] 创建正则化数据迭代器失败: {e}")
+                raise
         else:
             dataloader_reg = None
             dataloader_iterator_reg = None
+            logger.info(f"🔍 [TRAIN_LOOP] 无正则化数据加载器")
 
         # zero any gradients
         optimizer.zero_grad()

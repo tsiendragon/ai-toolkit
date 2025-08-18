@@ -31,7 +31,7 @@ def is_native_windows():
 
 if TYPE_CHECKING:
     from toolkit.stable_diffusion_model import StableDiffusion
-    
+
 
 image_extensions = ['.jpg', '.jpeg', '.png', '.webp']
 video_extensions = ['.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.flv']
@@ -386,6 +386,10 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             batch_size=1,
             sd: 'StableDiffusion' = None,
     ):
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"🔍 [DATASET_INIT] AiToolkitDataset 初始化开始")
+
         self.dataset_config = dataset_config
         # update bucket divisibility
         self.dataset_config.bucket_tolerance = sd.get_bucket_divisibility()
@@ -432,7 +436,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                 self.caption_dict = json.load(f)
                 # keys are file paths
                 file_list = list(self.caption_dict.keys())
-                
+
         # remove items in the _controls_ folder
         file_list = [x for x in file_list if not os.path.basename(os.path.dirname(x)) == "_controls"]
 
@@ -466,14 +470,14 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         dataset_folder = self.dataset_path
         if not os.path.isdir(self.dataset_path):
             dataset_folder = os.path.dirname(dataset_folder)
-        
+
         dataset_size_file = os.path.join(dataset_folder, '.aitk_size.json')
         dataloader_version = "0.1.2"
         if os.path.exists(dataset_size_file):
             try:
                 with open(dataset_size_file, 'r') as f:
                     self.size_database = json.load(f)
-                
+
                 if "__version__" not in self.size_database or self.size_database["__version__"] != dataloader_version:
                     print_acc("Upgrading size database to new version")
                     # old version, delete and recreate
@@ -484,7 +488,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                 self.size_database = {}
         else:
             self.size_database = {}
-        
+
         self.size_database["__version__"] = dataloader_version
 
         bad_count = 0
@@ -511,7 +515,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         # save the size database
         with open(dataset_size_file, 'w') as f:
             json.dump(self.size_database, f)
-        
+
         if self.is_video:
             print_acc(f"  -  Found {len(self.file_list)} videos")
             assert len(self.file_list) > 0, f"no videos found in {self.dataset_path}"
@@ -545,35 +549,68 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             else:
                 print_acc(f"  -  Found {len(self.file_list)} images after adding flips")
 
+        logger.info(f"🔍 [DATASET_INIT] AiToolkitDataset 初始化完成")
+        logger.info(f"🔍 [DATASET_INIT] - dataset_path: {self.dataset_path}")
+        logger.info(f"🔍 [DATASET_INIT] - batch_size: {batch_size}")
+        logger.info(f"🔍 [DATASET_INIT] - buckets: {dataset_config.buckets}")
+        logger.info(f"🔍 [DATASET_INIT] - cache_latents: {self.is_caching_latents}")
+        logger.info(f"🔍 [DATASET_INIT] - file_list 长度: {len(self.file_list) if hasattr(self, 'file_list') else 'unknown'}")
+
         self.setup_epoch()
 
     def setup_epoch(self):
+        import logging
+        logger = logging.getLogger(__name__)
+
+        logger.info(f"🔍 [SETUP_EPOCH] setup_epoch 开始，epoch_num: {self.epoch_num}")
+
         if self.epoch_num == 0:
             # initial setup
-            # do not call for now
+            logger.info(f"🔍 [SETUP_EPOCH] 初始化 epoch (epoch_num=0)")
+
             if self.dataset_config.buckets:
-                # setup buckets
+                logger.info(f"🔍 [SETUP_EPOCH] 设置 buckets")
                 self.setup_buckets()
+                logger.info(f"🔍 [SETUP_EPOCH] buckets 设置完成，数量: {len(self.buckets) if hasattr(self, 'buckets') else 'unknown'}")
+
             if self.is_caching_latents:
+                logger.info(f"🔍 [SETUP_EPOCH] 缓存 latents")
                 self.cache_latents_all_latents()
+
             if self.is_caching_clip_vision_to_disk:
+                logger.info(f"🔍 [SETUP_EPOCH] 缓存 CLIP vision")
                 self.cache_clip_vision_to_disk()
+
             if self.is_caching_text_embeddings:
+                logger.info(f"🔍 [SETUP_EPOCH] 缓存文本嵌入")
                 self.cache_text_embeddings()
+
             if self.is_generating_controls:
-                # always do this last
+                logger.info(f"🔍 [SETUP_EPOCH] 设置控制")
                 self.setup_controls()
         else:
+            logger.info(f"🔍 [SETUP_EPOCH] 非初始化 epoch (epoch_num={self.epoch_num})")
             if self.dataset_config.poi is not None:
-                # handle cropping to a specific point of interest
-                # setup buckets every epoch
+                logger.info(f"🔍 [SETUP_EPOCH] 重新设置 buckets (POI 模式)")
                 self.setup_buckets(quiet=True)
+
         self.epoch_num += 1
+        logger.info(f"🔍 [SETUP_EPOCH] setup_epoch 完成，新的 epoch_num: {self.epoch_num}")
 
     def __len__(self):
+        import logging
+        logger = logging.getLogger(__name__)
+
         if self.dataset_config.buckets:
-            return len(self.batch_indices)
-        return len(self.file_list)
+            length = len(self.batch_indices)
+            logger.info(f"🔍 [DATASET] __len__ buckets 模式: {length} 批次")
+            logger.info(f"🔍 [DATASET] - batch_indices 详情: {len(self.batch_indices)} 个批次")
+            logger.info(f"🔍 [DATASET] - buckets 数量: {len(self.buckets) if hasattr(self, 'buckets') else 'unknown'}")
+            return length
+        else:
+            length = len(self.file_list)
+            logger.info(f"🔍 [DATASET] __len__ 标准模式: {length} 个文件")
+            return length
 
     def _get_single_item(self, index) -> 'FileItemDTO':
         file_item: 'FileItemDTO' = copy.deepcopy(self.file_list[index])
@@ -582,10 +619,16 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         return file_item
 
     def __getitem__(self, item):
+        import logging
+        logger = logging.getLogger(__name__)
+
         if self.dataset_config.buckets:
             # for buckets we collate ourselves for now
             # todo allow a scheduler to dynamically make buckets
             # we collate ourselves
+            logger.debug(f"🔍 [DATASET] __getitem__ buckets 模式, item: {item}")
+            logger.debug(f"🔍 [DATASET] - batch_indices 长度: {len(self.batch_indices)}")
+
             if len(self.batch_indices) - 1 < item:
                 # tried everything to solve this. No way to reset length when redoing things. Pick another index
                 item = random.randint(0, len(self.batch_indices) - 1)
@@ -601,7 +644,17 @@ def get_dataloader_from_datasets(
         batch_size=1,
         sd: 'StableDiffusion' = None,
 ) -> DataLoader:
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+    logger.info(f"🔍 [DATA_FLOW] get_dataloader_from_datasets 开始")
+    logger.info(f"🔍 [DATA_FLOW] dataset_options 数量: {len(dataset_options) if dataset_options else 0}")
+    logger.info(f"🔍 [DATA_FLOW] batch_size: {batch_size}")
+    logger.info(f"🔍 [DATA_FLOW] sd 模型: {sd.__class__.__name__ if sd else None}")
+
     if dataset_options is None or len(dataset_options) == 0:
+        logger.warning(f"⚠️ [DATA_FLOW] dataset_options 为空，返回 None")
         return None
 
     datasets = []
@@ -619,19 +672,34 @@ def get_dataloader_from_datasets(
             for x in split_configs:
                 dataset_config_list.append(DatasetConfig(**x))
 
-    for config in dataset_config_list:
+    for i, config in enumerate(dataset_config_list):
+        logger.info(f"🔍 [DATA_FLOW] 处理数据集 {i+1}/{len(dataset_config_list)}")
+        logger.info(f"🔍 [DATA_FLOW] - 类型: {config.type}")
+        logger.info(f"🔍 [DATA_FLOW] - 路径: {config.folder_path}")
+        logger.info(f"🔍 [DATA_FLOW] - buckets: {config.buckets}")
+        logger.info(f"🔍 [DATA_FLOW] - cache_latents: {config.cache_latents}")
+        logger.info(f"🔍 [DATA_FLOW] - cache_latents_to_disk: {config.cache_latents_to_disk}")
 
         if config.type == 'image':
             dataset = AiToolkitDataset(config, batch_size=batch_size, sd=sd)
             datasets.append(dataset)
+
+            logger.info(f"🔍 [DATA_FLOW] - 创建的数据集大小: {len(dataset)}")
+            logger.info(f"🔍 [DATA_FLOW] - 数据集文件数量: {len(dataset.file_list) if hasattr(dataset, 'file_list') else 'unknown'}")
+
             if config.buckets:
                 has_buckets = True
+                logger.info(f"🔍 [DATA_FLOW] - 启用 buckets 模式")
             if config.cache_latents or config.cache_latents_to_disk:
                 is_caching_latents = True
+                logger.info(f"🔍 [DATA_FLOW] - 启用 latents 缓存")
         else:
             raise ValueError(f"invalid dataset type: {config.type}")
 
     concatenated_dataset = ConcatDataset(datasets)
+    logger.info(f"🔍 [DATA_FLOW] 合并数据集完成，总大小: {len(concatenated_dataset)}")
+    logger.info(f"🔍 [DATA_FLOW] has_buckets: {has_buckets}")
+    logger.info(f"🔍 [DATA_FLOW] is_caching_latents: {is_caching_latents}")
 
     # todo build scheduler that can get buckets from all datasets that match
     # todo and evenly distribute reg images
@@ -646,7 +714,7 @@ def get_dataloader_from_datasets(
     # check if is caching latents
 
     dataloader_kwargs = {}
-    
+
     if is_native_windows():
         dataloader_kwargs['num_workers'] = 0
     else:
@@ -658,6 +726,12 @@ def get_dataloader_from_datasets(
         for dataset in datasets:
             assert dataset.dataset_config.buckets, f"buckets not found on dataset {dataset.dataset_config.folder_path}, you either need all buckets or none"
 
+        logger.info(f"🔍 [DATA_FLOW] 创建 buckets 模式 DataLoader")
+        logger.info(f"🔍 [DATA_FLOW] - batch_size: None (buckets 自行批处理)")
+        logger.info(f"🔍 [DATA_FLOW] - drop_last: False")
+        logger.info(f"🔍 [DATA_FLOW] - shuffle: True")
+        logger.info(f"🔍 [DATA_FLOW] - dataloader_kwargs: {dataloader_kwargs}")
+
         data_loader = DataLoader(
             concatenated_dataset,
             batch_size=None,  # we batch in the datasets for now
@@ -667,6 +741,11 @@ def get_dataloader_from_datasets(
             **dataloader_kwargs
         )
     else:
+        logger.info(f"🔍 [DATA_FLOW] 创建标准模式 DataLoader")
+        logger.info(f"🔍 [DATA_FLOW] - batch_size: {batch_size}")
+        logger.info(f"🔍 [DATA_FLOW] - shuffle: True")
+        logger.info(f"🔍 [DATA_FLOW] - dataloader_kwargs: {dataloader_kwargs}")
+
         data_loader = DataLoader(
             concatenated_dataset,
             batch_size=batch_size,
@@ -674,6 +753,12 @@ def get_dataloader_from_datasets(
             collate_fn=dto_collation,
             **dataloader_kwargs
         )
+
+    logger.info(f"🔍 [DATA_FLOW] DataLoader 创建完成")
+    logger.info(f"🔍 [DATA_FLOW] - DataLoader 长度: {len(data_loader)}")
+    logger.info(f"🔍 [DATA_FLOW] - DataLoader batch_size: {getattr(data_loader, 'batch_size', 'None')}")
+    logger.info(f"🔍 [DATA_FLOW] - DataLoader dataset 长度: {len(data_loader.dataset)}")
+
     return data_loader
 
 
