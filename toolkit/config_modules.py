@@ -37,6 +37,11 @@ class LoggingConfig:
         self.project_name: str = kwargs.get('project_name', 'ai-toolkit')
         self.run_name: str = kwargs.get('run_name', None)
 
+        # TensorBoard 图像记录配置 - by Tsien at 2025-08-18
+        self.log_images: bool = kwargs.get('log_images', False)  # 是否记录训练图像
+        self.log_images_every: int = kwargs.get('log_images_every', 500)  # 每隔多少步记录图像
+        self.log_images_count: int = kwargs.get('log_images_count', 8)  # 每次记录多少对图像
+
 class SampleItem:
     def __init__(
         self,

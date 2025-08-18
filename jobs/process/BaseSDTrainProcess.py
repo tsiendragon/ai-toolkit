@@ -101,6 +101,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.grad_accumulation_step = 1
         # if true, then we do not do an optimizer step. We are accumulating gradients
         self.is_grad_accumulation_step = False
+        # 用于图像记录的当前批次 - by Tsien at 2025-08-18
+        self._current_batch = None
         self.device = str(self.accelerator.device)
         self.device_torch = self.accelerator.device
         network_config = self.get_conf('network', None)
@@ -2197,6 +2199,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 self.torch_profiler.start()
             with self.accelerator.accumulate(self.modules_being_trained):
                 try:
+                    # 保存当前批次用于图像记录 - by Tsien at 2025-08-18
+                    self._current_batch = batch_list[0] if batch_list and len(batch_list) > 0 else None
+
                     loss_dict = self.hook_train_loop(batch_list)
                 except Exception as e:
                     traceback.print_exc()
@@ -2295,6 +2300,28 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                     for key, value in loss_dict.items():
                                         self.writer.add_scalar(f"{key}", value, self.step_num)
                                     self.writer.add_scalar(f"lr", learning_rate, self.step_num)
+
+                                    # 记录训练图像和控制图像到 TensorBoard - by Tsien at 2025-08-18
+                                    if hasattr(self.logging_config, 'log_images') and self.logging_config.log_images:
+                                        from toolkit.image_logging_utils import should_log_images, log_training_images
+
+                                        if should_log_images(
+                                            self.step_num,
+                                            self.logging_config.log_images_every,
+                                            self.logging_config.log_images
+                                        ):
+                                            try:
+                                                # 使用当前批次数据记录图像
+                                                if hasattr(self, '_current_batch') and self._current_batch is not None:
+                                                    log_training_images(
+                                                        self.writer,
+                                                        self._current_batch,
+                                                        self.step_num,
+                                                        max_images=self.logging_config.log_images_count
+                                                    )
+                                            except Exception as e:
+                                                print(f"⚠️ [IMAGE_LOG] 图像记录失败: {e}")
+
                                 if self.progress_bar is not None:
                                     self.progress_bar.unpause()
 
