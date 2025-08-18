@@ -643,6 +643,7 @@ def get_dataloader_from_datasets(
         dataset_options,
         batch_size=1,
         sd: 'StableDiffusion' = None,
+        train_config=None,
 ) -> DataLoader:
     import logging
     logger = logging.getLogger(__name__)
@@ -652,6 +653,16 @@ def get_dataloader_from_datasets(
     logger.info(f"🔍 [DATA_FLOW] dataset_options 数量: {len(dataset_options) if dataset_options else 0}")
     logger.info(f"🔍 [DATA_FLOW] batch_size: {batch_size}")
     logger.info(f"🔍 [DATA_FLOW] sd 模型: {sd.__class__.__name__ if sd else None}")
+
+    # 检查分布式训练配置，如果启用则自动禁用 buckets - by Tsien at 2025-08-18
+    is_distributed_training = False
+    if train_config and hasattr(train_config, 'distributed_training'):
+        is_distributed_training = getattr(train_config, 'distributed_training', False)
+        logger.info(f"🔍 [DISTRIBUTED] 分布式训练状态: {is_distributed_training}")
+
+    if is_distributed_training:
+        logger.info(f"🔧 [DISTRIBUTED] 检测到分布式训练，自动禁用所有数据集的 buckets 模式以解决架构冲突")
+        logger.info(f"📝 [DISTRIBUTED] 原因: buckets 模式的 batch_size=None 与 Accelerate 的分布式训练不兼容")
 
     if dataset_options is None or len(dataset_options) == 0:
         logger.warning(f"⚠️ [DATA_FLOW] dataset_options 为空，返回 None")
@@ -665,12 +676,25 @@ def get_dataloader_from_datasets(
     # preprocess them all
     for dataset_option in dataset_options:
         if isinstance(dataset_option, DatasetConfig):
-            dataset_config_list.append(dataset_option)
+            config_to_add = dataset_option
+            # 如果是分布式训练，创建一个副本并禁用 buckets
+            if is_distributed_training and config_to_add.buckets:
+                logger.info(f"🔧 [DISTRIBUTED] 数据集 {config_to_add.folder_path} 原本启用 buckets，现禁用以支持分布式训练")
+                # 创建配置副本并禁用 buckets
+                config_dict = config_to_add.__dict__.copy()
+                config_dict['buckets'] = False
+                config_to_add = DatasetConfig(**config_dict)
+            dataset_config_list.append(config_to_add)
         else:
             # preprocess raw data
             split_configs = preprocess_dataset_raw_config([dataset_option])
             for x in split_configs:
-                dataset_config_list.append(DatasetConfig(**x))
+                config_dict = x.copy()
+                # 如果是分布式训练，禁用 buckets
+                if is_distributed_training and config_dict.get('buckets', True):
+                    logger.info(f"🔧 [DISTRIBUTED] 数据集 {config_dict.get('folder_path', 'unknown')} 原本启用 buckets，现禁用以支持分布式训练")
+                    config_dict['buckets'] = False
+                dataset_config_list.append(DatasetConfig(**config_dict))
 
     for i, config in enumerate(dataset_config_list):
         logger.info(f"🔍 [DATA_FLOW] 处理数据集 {i+1}/{len(dataset_config_list)}")

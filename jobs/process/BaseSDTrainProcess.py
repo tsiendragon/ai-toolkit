@@ -2003,7 +2003,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         if self.datasets is not None:
             logger.info(f"🔍 [TRAIN_PROCESS] 创建主训练数据加载器")
-            self.data_loader = get_dataloader_from_datasets(self.datasets, self.train_config.batch_size, self.sd)
+            # 传递 train_config 以支持分布式训练时自动禁用 buckets - by Tsien at 2025-08-18
+            self.data_loader = get_dataloader_from_datasets(self.datasets, self.train_config.batch_size, self.sd, self.train_config)
             if self.data_loader:
                 logger.info(f"🔍 [TRAIN_PROCESS] - 主数据加载器创建成功，长度: {len(self.data_loader)}")
                 logger.info(f"🔍 [TRAIN_PROCESS] - 数据集总大小: {len(self.data_loader.dataset)}")
@@ -2012,7 +2013,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         if self.datasets_reg is not None:
             logger.info(f"🔍 [TRAIN_PROCESS] 创建正则化数据加载器")
-            self.data_loader_reg = get_dataloader_from_datasets(self.datasets_reg, self.train_config.batch_size, self.sd)
+            # 传递 train_config 以支持分布式训练时自动禁用 buckets - by Tsien at 2025-08-18
+            self.data_loader_reg = get_dataloader_from_datasets(self.datasets_reg, self.train_config.batch_size, self.sd, self.train_config)
             if self.data_loader_reg:
                 logger.info(f"🔍 [TRAIN_PROCESS] - 正则化数据加载器创建成功，长度: {len(self.data_loader_reg)}")
             else:
