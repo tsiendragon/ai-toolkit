@@ -55,32 +55,32 @@ class FileItemDTO(
             file_key = self.path.replace(dataset_root, '')
         else:
             file_key = os.path.basename(self.path)
-        
+
         file_signature = get_quick_signature_string(self.path)
         if file_signature is None:
             raise Exception("Error: Could not get file signature for {self.path}")
-        
+
         use_db_entry = False
         if file_key in size_database:
             db_entry = size_database[file_key]
             if db_entry is not None and len(db_entry) >= 3 and db_entry[2] == file_signature:
                 use_db_entry = True
-        
+
         if use_db_entry:
             w, h, _ = size_database[file_key]
         elif self.is_video:
             # Open the video file
             video = cv2.VideoCapture(self.path)
-            
+
             # Check if video opened successfully
             if not video.isOpened():
                 raise Exception(f"Error: Could not open video file {self.path}")
-            
+
             # Get width and height
             width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
             w, h = width, height
-            
+
             # Release the video capture object immediately
             video.release()
             size_database[file_key] = (width, height, file_signature)
@@ -176,7 +176,7 @@ class DataLoaderBatchDTO:
                     else:
                         control_tensors.append(x.control_tensor)
                 self.control_tensor = torch.cat([x.unsqueeze(0) for x in control_tensors])
-                
+
             self.inpaint_tensor: Union[torch.Tensor, None] = None
             if any([x.inpaint_tensor is not None for x in self.file_items]):
                 # find one to use as a base
@@ -272,7 +272,7 @@ class DataLoaderBatchDTO:
                         self.clip_image_embeds_unconditional.append(x.clip_image_embeds_unconditional)
                     else:
                         raise Exception("clip_image_embeds_unconditional is None for some file items")
-            
+
             if any([x.prompt_embeds is not None for x in self.file_items]):
                 # find one to use as a base
                 base_prompt_embeds = None
@@ -287,7 +287,7 @@ class DataLoaderBatchDTO:
                     else:
                         prompt_embeds_list.append(x.prompt_embeds)
                 self.prompt_embeds = concat_prompt_embeds(prompt_embeds_list)
-                    
+
 
         except Exception as e:
             print(e)
@@ -321,10 +321,60 @@ class DataLoaderBatchDTO:
         del self.control_tensor
         for file_item in self.file_items:
             file_item.cleanup()
-    
+
     @property
     def dataset_config(self) -> 'DatasetConfig':
         if len(self.file_items) > 0:
             return self.file_items[0].dataset_config
         else:
+            return None
+
+    def get_images_for_tensorboard(self, max_images: int = 8) -> Union[torch.Tensor, None]:
+        """
+        按需加载原始图像用于TensorBoard可视化
+        仅在latent缓存模式下且需要图像记录时使用
+
+        Args:
+            max_images: 最大加载图像数量
+
+        Returns:
+            torch.Tensor: 图像张量 [B, C, H, W] 或 None
+        """
+        try:
+            # 如果已经有tensor，直接返回
+            if self.tensor is not None:
+                return self.tensor[:max_images] if self.tensor.shape[0] > max_images else self.tensor
+
+            # 如果没有file_items，无法加载
+            if not self.file_items:
+                return None
+
+            # 按需加载图像（仅用于可视化）
+            images = []
+            num_to_load = min(len(self.file_items), max_images)
+
+            for i in range(num_to_load):
+                file_item = self.file_items[i]
+
+                # 重新加载原始图像
+                if hasattr(file_item, 'path') and file_item.path:
+                    try:
+                        # 使用file_item的加载机制
+                        file_item.load_image()
+                        if hasattr(file_item, 'tensor') and file_item.tensor is not None:
+                            images.append(file_item.tensor.unsqueeze(0))
+                        # 清理图像内存（保持训练性能）
+                        if hasattr(file_item, 'cleanup_image'):
+                            file_item.cleanup_image()
+                    except Exception as e:
+                        print(f"⚠️ [TENSORBOARD_IMAGE] 加载图像失败 {file_item.path}: {e}")
+                        continue
+
+            if images:
+                return torch.cat(images, dim=0)
+            else:
+                return None
+
+        except Exception as e:
+            print(f"⚠️ [TENSORBOARD_IMAGE] 获取TensorBoard图像失败: {e}")
             return None

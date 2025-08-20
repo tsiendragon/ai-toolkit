@@ -170,7 +170,7 @@ class BaseModel:
         self.is_transformer = False
 
         self.sample_prompts_cache = None
-        
+
         self.accuracy_recovery_adapter: Union[None, 'LoRASpecialNetwork'] = None
         self.is_multistage = False
         # a list of multistage boundaries starting with train step 1000 to first idx
@@ -182,16 +182,16 @@ class BaseModel:
     @property
     def unet(self):
         return self.model
-    
+
     # set unet to model
     @unet.setter
     def unet(self, value):
         self.model = value
-        
+
     @property
     def transformer(self):
         return self.model
-    
+
     @transformer.setter
     def transformer(self, value):
         self.model = value
@@ -248,7 +248,7 @@ class BaseModel:
         except:
             # if we have a custom vae, it might not have this
             divisibility = 8
-        
+
         # flux packs this again,
         if self.is_flux:
             divisibility = divisibility * 2
@@ -290,15 +290,15 @@ class BaseModel:
     def get_prompt_embeds(self, prompt: str) -> PromptEmbeds:
         raise NotImplementedError(
             "get_prompt_embeds must be implemented in child classes")
-        
+
     def get_model_has_grad(self):
         raise NotImplementedError(
             "get_model_has_grad must be implemented in child classes")
-    
+
     def get_te_has_grad(self):
         raise NotImplementedError(
             "get_te_has_grad must be implemented in child classes")
-        
+
     def save_model(self, output_path, meta, save_dtype):
         # todo handle dtype without overloading anything (vram, cpu, etc)
         unwrap_model(self.pipeline).save_pretrained(
@@ -387,7 +387,20 @@ class BaseModel:
             network = BlankNetwork()
 
         self.save_device_state()
-        self.set_device_state_preset('generate')
+
+        # 优化采样设备状态：根据缓存情况选择最佳配置 - by Tsien at 2025-08-19
+        has_cached_embeddings = hasattr(self, 'sample_prompts_cache') and self.sample_prompts_cache is not None
+        has_cached_latents = getattr(self, 'is_latents_cached', False)
+
+        if has_cached_embeddings and has_cached_latents:
+            print_acc("🌟 [极致优化] 使用缓存的embeddings+latents，仅加载VAE Decoder + UNet")
+            self.set_device_state_preset('generate_decoder_only')
+        elif has_cached_embeddings:
+            print_acc("🚀 [采样优化] 使用缓存的embeddings，跳过Text Encoder加载")
+            self.set_device_state_preset('generate_with_cached_embeddings')
+        else:
+            print_acc("⚠️ [采样] 未找到缓存embeddings，加载完整的文本编码器")
+            self.set_device_state_preset('generate')
 
         # save current seed state for training
         rng_state = torch.get_rng_state()
@@ -496,7 +509,7 @@ class BaseModel:
                     if self.sample_prompts_cache is not None:
                         conditional_embeds = self.sample_prompts_cache[i]['conditional'].to(self.device_torch, dtype=self.torch_dtype)
                         unconditional_embeds = self.sample_prompts_cache[i]['unconditional'].to(self.device_torch, dtype=self.torch_dtype)
-                    else: 
+                    else:
                         # encode the prompt ourselves so we can do fun stuff with embeddings
                         if isinstance(self.adapter, CustomAdapter):
                             self.adapter.is_unconditional_run = False
@@ -577,14 +590,16 @@ class BaseModel:
                     unconditional_embeds = unconditional_embeds.to(
                         self.device_torch, dtype=self.unet.dtype)
 
-                    img = self.generate_single_image(
-                        pipeline,
-                        gen_config,
-                        conditional_embeds,
-                        unconditional_embeds,
-                        generator,
-                        extra,
-                    )
+                    # 使用 accelerator 的 autocast 上下文来处理混合精度推理 - 修复 bf16 数据类型不匹配问题
+                    with self.accelerator.autocast():
+                        img = self.generate_single_image(
+                            pipeline,
+                            gen_config,
+                            conditional_embeds,
+                            unconditional_embeds,
+                            generator,
+                            extra,
+                        )
 
                     gen_config.save_image(img, i)
                     gen_config.log_image(img, i)
@@ -665,7 +680,7 @@ class BaseModel:
         )
         noise = apply_noise_offset(noise, noise_offset)
         return noise
-    
+
     def get_latent_noise_from_latents(
         self,
         latents: torch.Tensor,
@@ -834,11 +849,11 @@ class BaseModel:
                 pass
         if self.unet.dtype != self.torch_dtype:
             self.unet = self.unet.to(dtype=self.torch_dtype)
-            
+
         # check if get_noise prediction has guidance_embedding_scale
         # if it does not, we dont pass it
         signatures =  inspect.signature(self.get_noise_prediction).parameters
-        
+
         if 'guidance_embedding_scale' in signatures:
             kwargs['guidance_embedding_scale'] = guidance_embedding_scale
         if 'bypass_guidance_embedding' in signatures:
@@ -1060,10 +1075,17 @@ class BaseModel:
         # Move to vae to device if on cpu
         if self.vae.device == 'cpu':
             self.vae.to(self.device)
-        latents = latents.to(device, dtype=dtype)
+
+        # 确保 latents 的数据类型与 VAE 模型一致 - 修复 bf16 混合精度问题
+        vae_dtype = next(self.vae.parameters()).dtype
+        latents = latents.to(device, dtype=vae_dtype)
         latents = (
             latents / self.vae.config['scaling_factor']) + self.vae.config['shift_factor']
-        images = self.vae.decode(latents).sample
+
+        # 使用 accelerator 的 autocast 上下文进行 VAE 解码
+        with self.accelerator.autocast():
+            images = self.vae.decode(latents).sample
+
         images = images.to(device, dtype=dtype)
 
         return images
@@ -1243,7 +1265,7 @@ class BaseModel:
             for param in named_params.values():
                 if param.requires_grad:
                     params.append(param)
-           
+
             param_data = {"params": params, "lr": unet_lr}
             trainable_parameters.append(param_data)
             print_acc(f"Found {len(params)} trainable parameter in unet")
@@ -1359,11 +1381,31 @@ class BaseModel:
         self.device_state = None
 
     def set_device_state(self, state):
-        if state['vae']['training']:
-            self.vae.train()
+        # VAE 设备状态管理：支持整体和细分控制 - by Tsien at 2025-08-19
+        if 'vae_encoder' in state and 'vae_decoder' in state:
+            # 使用细分的 VAE encoder/decoder 控制
+            if hasattr(self.vae, 'encoder'):
+                if state['vae_encoder']['training']:
+                    self.vae.encoder.train()
+                else:
+                    self.vae.encoder.eval()
+                self.vae.encoder.to(state['vae_encoder']['device'])
+                self.vae.encoder.requires_grad_(state['vae_encoder'].get('requires_grad', False))
+
+            if hasattr(self.vae, 'decoder'):
+                if state['vae_decoder']['training']:
+                    self.vae.decoder.train()
+                else:
+                    self.vae.decoder.eval()
+                self.vae.decoder.to(state['vae_decoder']['device'])
+                self.vae.decoder.requires_grad_(state['vae_decoder'].get('requires_grad', False))
         else:
-            self.vae.eval()
-        self.vae.to(state['vae']['device'])
+            # 兼容旧版本：整体控制VAE
+            if state['vae']['training']:
+                self.vae.train()
+            else:
+                self.vae.eval()
+            self.vae.to(state['vae']['device'])
         if state['unet']['training']:
             self.unet.train()
         else:
@@ -1427,19 +1469,43 @@ class BaseModel:
         active_modules = []
         training_modules = []
         if device_state_preset in ['cache_latents']:
-            active_modules = ['vae']
+            # 缓存latents时只需要VAE encoder - by Tsien at 2025-08-19
+            active_modules = ['vae', 'vae_encoder']
         if device_state_preset in ['cache_clip']:
             active_modules = ['clip']
+        if device_state_preset in ['cache_text_encoder']:
+            active_modules = ['text_encoder']  # 修复：添加对cache_text_encoder预设的支持 - by Tsien at 2025-01-27
+        if device_state_preset in ['unload']:
+            active_modules = []  # 修复：添加对unload预设的支持 - by Tsien at 2025-01-27
         if device_state_preset in ['generate']:
             active_modules = ['vae', 'unet',
                               'text_encoder', 'adapter', 'refiner_unet']
+        if device_state_preset in ['generate_with_cached_embeddings']:
+            # 优化采样：当使用缓存的embeddings时，只需要VAE和UNet - by Tsien at 2025-08-19
+            active_modules = ['vae', 'unet', 'adapter', 'refiner_unet']
+        if device_state_preset in ['generate_decoder_only']:
+            # 极致优化采样：latents已缓存，只需要VAE decoder + UNet - by Tsien at 2025-08-19
+            active_modules = ['vae_decoder', 'unet', 'adapter', 'refiner_unet']
 
         state = copy.deepcopy(empty_preset)
-        # vae
+        # vae (整体，兼容旧版本)
         state['vae'] = {
             'training': 'vae' in training_modules,
             'device': self.vae_device_torch if 'vae' in active_modules else 'cpu',
             'requires_grad': 'vae' in training_modules,
+        }
+
+        # vae encoder/decoder 细分控制 - by Tsien at 2025-08-19
+        state['vae_encoder'] = {
+            'training': 'vae_encoder' in training_modules,
+            'device': self.vae_device_torch if 'vae_encoder' in active_modules else 'cpu',
+            'requires_grad': 'vae_encoder' in training_modules,
+        }
+
+        state['vae_decoder'] = {
+            'training': 'vae_decoder' in training_modules,
+            'device': self.vae_device_torch if 'vae_decoder' in active_modules else 'cpu',
+            'requires_grad': 'vae_decoder' in training_modules,
         }
 
         # unet
@@ -1487,23 +1553,23 @@ class BaseModel:
                 encoder.to(*args, **kwargs)
         else:
             self.text_encoder.to(*args, **kwargs)
-    
+
     def convert_lora_weights_before_save(self, state_dict):
         # can be overridden in child classes to convert weights before saving
         return state_dict
-    
+
     def convert_lora_weights_before_load(self, state_dict):
         # can be overridden in child classes to convert weights before loading
         return state_dict
-    
+
     def condition_noisy_latents(self, latents: torch.Tensor, batch:'DataLoaderBatchDTO'):
         # can be overridden in child classes to condition latents before noise prediction
         return latents
-    
+
     def get_transformer_block_names(self) -> Optional[List[str]]:
         # override in child classes to get transformer block names for lora targeting
         return None
-    
+
     def get_base_model_version(self) -> str:
         # override in child classes to get the base model version
         return "unknown"

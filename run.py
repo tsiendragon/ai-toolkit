@@ -45,6 +45,21 @@ def print_end_message(jobs_completed, jobs_failed):
 
 
 def main():
+    # Fix distributed training GPU mapping - by Tsien at 2025-08-19
+    # Set CUDA_VISIBLE_DEVICES to LOCAL_RANK so each process only sees its GPU
+    if 'LOCAL_RANK' in os.environ:
+        local_rank = int(os.environ['LOCAL_RANK'])
+        # Each process should only see its own GPU
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(local_rank)
+        print(f"[rank{local_rank}] Setting CUDA_VISIBLE_DEVICES={local_rank}")
+
+        # Import torch after setting CUDA_VISIBLE_DEVICES
+        import torch
+        if torch.cuda.is_available():
+            # Now device 0 in each process corresponds to the actual GPU rank
+            torch.cuda.set_device(0)  # Always use device 0 since CUDA_VISIBLE_DEVICES limits visibility
+            print(f"[rank{local_rank}] Using torch.cuda.set_device(0) -> actual GPU {local_rank}")
+
     parser = argparse.ArgumentParser()
 
     # require at lease one config file

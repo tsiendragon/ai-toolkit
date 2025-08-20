@@ -171,7 +171,13 @@ class TrainSDRescaleProcess(BaseSDTrainProcess):
 
                 file_name = f"{seed_string}_{i}.safetensors"
                 file_path = os.path.join(self.rescale_config.latent_tensor_dir, file_name)
-                save_file(state_dict, file_path)
+                # Use safe wrapper for distributed training
+                try:
+                    from toolkit.safetensors_util import safe_save_file
+                    safe_save_file(state_dict, file_path)
+                except Exception as e:
+                    print(f"Warning: Failed to save with safe_save_file, trying fallback: {e}")
+                    save_file(state_dict, file_path)
                 self.latent_paths.append(file_path)
 
             print("Removing parent model")

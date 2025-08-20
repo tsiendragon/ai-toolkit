@@ -2,6 +2,8 @@ import os
 from collections import OrderedDict
 
 from safetensors.torch import save_file
+# Safe safetensors operations for distributed training - by Tsien at 2025-08-19
+from toolkit.safetensors_util import safe_save_file
 
 from jobs.process.BaseProcess import BaseProcess
 from toolkit.metadata import get_meta_for_safetensors
@@ -40,7 +42,12 @@ class BaseMergeProcess(BaseProcess):
             v = v.detach().clone().to("cpu").to(self.torch_dtype)
             state_dict[key] = v
 
-        # having issues with meta
-        save_file(state_dict, self.output_path, save_meta)
+        # having issues with meta - use safe wrapper for distributed training
+        try:
+            safe_save_file(state_dict, self.output_path, metadata=save_meta)
+        except Exception as e:
+            print(f"Warning: Failed to save with safe_save_file, trying fallback: {e}")
+            # Fallback to original save_file if safe wrapper fails
+            save_file(state_dict, self.output_path, save_meta)
 
         print(f"Saved to {self.output_path}")

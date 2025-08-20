@@ -8,6 +8,14 @@ empty_preset = {
         'training': False,
         'device': 'cpu',
     },
+    'vae_encoder': {
+        'training': False,
+        'device': 'cpu',
+    },
+    'vae_decoder': {
+        'training': False,
+        'device': 'cpu',
+    },
     'unet': {
         'training': False,
         'requires_grad': False,
@@ -90,7 +98,7 @@ def get_train_sd_device_state_preset(
         preset['unet']['requires_grad'] = False
         preset['unet']['device'] = device
         preset['text_encoder']['device'] = device
-    
+
     if train_decorator:
         preset['text_encoder']['training'] = False
         preset['text_encoder']['requires_grad'] = False

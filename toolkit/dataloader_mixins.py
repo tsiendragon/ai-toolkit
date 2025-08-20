@@ -13,6 +13,8 @@ import cv2
 import numpy as np
 import torch
 from safetensors.torch import load_file, save_file
+# Safe safetensors operations for distributed training - by Tsien at 2025-08-19
+from toolkit.safetensors_util import safe_load_file, safe_save_file, is_safetensors_file_valid, cleanup_corrupted_cache_file
 from tqdm import tqdm
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection, SiglipImageProcessor
 
@@ -1117,16 +1119,19 @@ class ControlFileItemDTOMixin:
 
     def get_control_latent(self: 'FileItemDTO', device=None):
         """Get cached control latent"""
-        from safetensors.torch import load_file
-
         if not self.is_control_latent_cached:
             return None
         if self._control_encoded_latent is None:
-            # load it from disk
-            state_dict = load_file(
-                self.get_control_latent_path(),
-                device='cpu'
-            )
+            # load it from disk with safe error handling
+            try:
+                state_dict = safe_load_file(
+                    self.get_control_latent_path(),
+                    device='cpu'
+                )
+            except Exception as e:
+                # Handle corrupted cache file
+                cleanup_corrupted_cache_file(self.get_control_latent_path())
+                return None
             self._control_encoded_latent = state_dict['control_latent']
         return self._control_encoded_latent
 
@@ -1299,12 +1304,18 @@ class ClipImageFileItemDTOMixin:
         if self.clip_image_processor is None:
             is_dynamic_size_and_aspect = True # serving it raw
         if self.is_vision_clip_cached:
-            self.clip_image_embeds = load_file(self.get_clip_vision_embeddings_path())
+            try:
+                self.clip_image_embeds = safe_load_file(self.get_clip_vision_embeddings_path())
 
-            # get a random unconditional image
-            if self.clip_vision_unconditional_paths is not None:
-                unconditional_path = random.choice(self.clip_vision_unconditional_paths)
-                self.clip_image_embeds_unconditional = load_file(unconditional_path)
+                # get a random unconditional image
+                if self.clip_vision_unconditional_paths is not None:
+                    unconditional_path = random.choice(self.clip_vision_unconditional_paths)
+                    self.clip_image_embeds_unconditional = safe_load_file(unconditional_path)
+            except Exception as e:
+                # Handle corrupted clip cache
+                print(f"Warning: Failed to load CLIP cache, regenerating: {e}")
+                self.is_vision_clip_cached = False
+                # Continue with normal processing
 
             return
         clip_image_path = self.get_new_clip_image_path()
@@ -1913,12 +1924,16 @@ class LatentCachingFileItemDTOMixin:
         if not self.is_latent_cached:
             return None
         if self._encoded_latent is None:
-            # load it from disk
-            state_dict = load_file(
-                self.get_latent_path(),
-                # device=device if device is not None else self.latent_load_device
-                device='cpu'
-            )
+            # load it from disk with safe error handling
+            try:
+                state_dict = safe_load_file(
+                    self.get_latent_path(),
+                    device='cpu'
+                )
+            except Exception as e:
+                # Handle corrupted latent cache
+                cleanup_corrupted_cache_file(self.get_latent_path())
+                return None
             self._encoded_latent = state_dict['latent']
         return self._encoded_latent
 
@@ -1943,7 +1958,7 @@ class LatentCachingMixin:
                 print_acc(" - Saving latents to disk")
             if to_memory:
                 print_acc(" - Keeping latents in memory")
-            # move sd items to cpu except for vae
+                        # move sd items to cpu except for vae
             self.sd.set_device_state_preset('cache_latents')
 
             # use tqdm to show progress
@@ -1973,8 +1988,13 @@ class LatentCachingMixin:
                 if os.path.exists(latent_path):
                     need_regenerate = False
                     if to_memory:
-                        # load it into memory
-                        state_dict = load_file(latent_path, device='cpu')
+                        # load it into memory with safe error handling
+                        try:
+                            state_dict = safe_load_file(latent_path, device='cpu')
+                        except Exception as e:
+                            print_acc(f"[LATENT_CACHE] 警告: 加载缓存失败，将重新生成: {e}")
+                            need_regenerate = True
+                            continue
                         cached_latent = state_dict['latent'].to('cpu', dtype=self.sd.torch_dtype)
 
                         # 验证 latent 尺寸是否正确 [16, w//8, h//8]
@@ -2037,7 +2057,7 @@ class LatentCachingMixin:
                             ])
                             meta = get_meta_for_safetensors(file_item.get_latent_info_dict())
                             os.makedirs(os.path.dirname(latent_path), exist_ok=True)
-                            save_file(state_dict, latent_path, metadata=meta)
+                            safe_save_file(state_dict, latent_path, metadata=meta)
                             print_acc(f"[LATENT_REGEN] 已保存重新生成的latent到: {latent_path}")
 
                         if to_memory:
@@ -2101,7 +2121,7 @@ class LatentCachingMixin:
                         # metadata
                         meta = get_meta_for_safetensors(file_item.get_latent_info_dict())
                         os.makedirs(os.path.dirname(latent_path), exist_ok=True)
-                        save_file(state_dict, latent_path, metadata=meta)
+                        safe_save_file(state_dict, latent_path, metadata=meta)
 
                     if to_memory:
                         # keep it in memory
@@ -2206,6 +2226,20 @@ class TextEmbeddingCachingMixin:
                         self.sd.set_device_state_preset('cache_text_encoder')
                         did_move = True
                     prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption)
+
+                    # 验证FLUX双编码器缓存内容 - by Tsien at 2025-01-27
+                    if self.sd.model_config.arch == 'flux' or self.sd.model_config.arch == 'flux_kontext':
+                        has_t5 = prompt_embeds.text_embeds is not None
+                        has_clip = prompt_embeds.pooled_embeds is not None
+                        if i == 0:  # 只在第一个文件时打印验证信息
+                            print(f"  ✅ FLUX双编码器缓存验证:")
+                            print(f"     - T5嵌入: {'✓' if has_t5 else '✗'}")
+                            print(f"     - CLIP池化嵌入: {'✓' if has_clip else '✗'}")
+                            if has_t5:
+                                print(f"     - T5形状: {prompt_embeds.text_embeds.shape}")
+                            if has_clip:
+                                print(f"     - CLIP形状: {prompt_embeds.pooled_embeds.shape}")
+
                     # save it
                     prompt_embeds.save(text_embedding_path)
                     del prompt_embeds
@@ -2327,7 +2361,7 @@ class CLIPCachingMixin:
                 ])
 
                 os.makedirs(os.path.dirname(uncond_path), exist_ok=True)
-                save_file(state_dict, uncond_path)
+                safe_save_file(state_dict, uncond_path)
                 unconditional_paths.append(uncond_path)
 
             self.clip_vision_unconditional_cache = unconditional_paths
@@ -2372,7 +2406,7 @@ class CLIPCachingMixin:
                     # metadata
                     meta = get_meta_for_safetensors(file_item.get_clip_vision_info_dict())
                     os.makedirs(os.path.dirname(embedding_path), exist_ok=True)
-                    save_file(state_dict, embedding_path, metadata=meta)
+                    safe_save_file(state_dict, embedding_path, metadata=meta)
 
                     del clip_image
                     del clip_output

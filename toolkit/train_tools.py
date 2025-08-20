@@ -525,8 +525,11 @@ def encode_prompts_flux(
             prompt if torch.rand(1).item() > dropout_prob else "" for prompt in prompts
         ]
 
-    device = text_encoder[0].device
-    dtype = text_encoder[0].dtype
+    # 分别获取每个编码器的设备，避免设备不匹配 - by Tsien at 2025-01-27
+    clip_device = text_encoder[0].device
+    clip_dtype = text_encoder[0].dtype
+    t5_device = text_encoder[1].device
+    t5_dtype = text_encoder[1].dtype
 
     batch_size = len(prompts)
 
@@ -543,11 +546,11 @@ def encode_prompts_flux(
 
     text_input_ids = text_inputs.input_ids
 
-    prompt_embeds = text_encoder[0](text_input_ids.to(device), output_hidden_states=False)
+    prompt_embeds = text_encoder[0](text_input_ids.to(clip_device), output_hidden_states=False)
 
     # Use pooled output of CLIPTextModel
     pooled_prompt_embeds = prompt_embeds.pooler_output
-    pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=dtype, device=device)
+    pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=clip_dtype, device=clip_device)
 
     # T5
     text_inputs = tokenizer[1](
@@ -561,14 +564,20 @@ def encode_prompts_flux(
     )
     text_input_ids = text_inputs.input_ids
 
-    prompt_embeds = text_encoder[1](text_input_ids.to(device), output_hidden_states=False)[0]
+    # 使用T5编码器自己的设备 - by Tsien at 2025-01-27
+    prompt_embeds = text_encoder[1](text_input_ids.to(t5_device), output_hidden_states=False)[0]
 
-    dtype = text_encoder[1].dtype
-    prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
+    prompt_embeds = prompt_embeds.to(dtype=t5_dtype, device=t5_device)
 
     if attn_mask:
         prompt_attention_mask = text_inputs["attention_mask"].unsqueeze(-1).expand(prompt_embeds.shape)
         prompt_embeds = prompt_embeds * prompt_attention_mask.to(dtype=prompt_embeds.dtype, device=prompt_embeds.device)
+
+    # 确保返回的张量在同一设备上 - by Tsien at 2025-01-27
+    # 使用第一个编码器的设备作为主设备
+    main_device = clip_device
+    prompt_embeds = prompt_embeds.to(device=main_device)
+    pooled_prompt_embeds = pooled_prompt_embeds.to(device=main_device)
 
     return prompt_embeds, pooled_prompt_embeds
 

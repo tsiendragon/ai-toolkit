@@ -566,6 +566,13 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
 
         logger.info(f"🔍 [SETUP_EPOCH] setup_epoch 开始，epoch_num: {self.epoch_num}")
 
+        # 检查是否在分布式训练中 - by Tsien at 2025-08-19
+        has_accelerator = hasattr(self.sd, 'accelerator') and self.sd.accelerator is not None
+        if has_accelerator:
+            current_rank = self.sd.accelerator.state.process_index
+            total_ranks = self.sd.accelerator.state.num_processes
+            logger.info(f"🔍 [DISTRIBUTED] rank {current_rank}/{total_ranks} 开始 setup_epoch")
+
         if self.epoch_num == 0:
             # initial setup
             logger.info(f"🔍 [SETUP_EPOCH] 初始化 epoch (epoch_num=0)")
@@ -574,31 +581,72 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                 logger.info(f"🔍 [SETUP_EPOCH] 设置 buckets")
                 self.setup_buckets()
                 logger.info(f"🔍 [SETUP_EPOCH] buckets 设置完成，数量: {len(self.buckets) if hasattr(self, 'buckets') else 'unknown'}")
+                # 分布式同步点1：buckets设置完成 - by Tsien at 2025-08-19
+                if has_accelerator:
+                    logger.info(f"🔄 [DISTRIBUTED] rank {current_rank} - buckets设置完成，等待同步...")
+                    self.sd.accelerator.wait_for_everyone()
+                    logger.info(f"✅ [DISTRIBUTED] rank {current_rank} - buckets同步完成")
 
             if self.is_caching_latents:
                 logger.info(f"🔍 [SETUP_EPOCH] 缓存 latents")
                 self.cache_latents_all_latents()
+                # 分布式同步点2：latents缓存完成 - by Tsien at 2025-08-19
+                if has_accelerator:
+                    logger.info(f"🔄 [DISTRIBUTED] rank {current_rank} - latents缓存完成，等待同步...")
+                    self.sd.accelerator.wait_for_everyone()
+                    logger.info(f"✅ [DISTRIBUTED] rank {current_rank} - latents缓存同步完成")
 
             if self.is_caching_control_latents_to_disk:
                 logger.info(f"🔍 [SETUP_EPOCH] 缓存 control latents")
                 self.cache_control_latents_all()
+                # 分布式同步点3：control latents缓存完成 - by Tsien at 2025-08-19
+                if has_accelerator:
+                    logger.info(f"🔄 [DISTRIBUTED] rank {current_rank} - control latents缓存完成，等待同步...")
+                    self.sd.accelerator.wait_for_everyone()
+                    logger.info(f"✅ [DISTRIBUTED] rank {current_rank} - control latents缓存同步完成")
 
             if self.is_caching_clip_vision_to_disk:
                 logger.info(f"🔍 [SETUP_EPOCH] 缓存 CLIP vision")
                 self.cache_clip_vision_to_disk()
+                # 分布式同步点4：CLIP vision缓存完成 - by Tsien at 2025-08-19
+                if has_accelerator:
+                    logger.info(f"🔄 [DISTRIBUTED] rank {current_rank} - CLIP vision缓存完成，等待同步...")
+                    self.sd.accelerator.wait_for_everyone()
+                    logger.info(f"✅ [DISTRIBUTED] rank {current_rank} - CLIP vision缓存同步完成")
 
             if self.is_caching_text_embeddings:
                 logger.info(f"🔍 [SETUP_EPOCH] 缓存文本嵌入")
                 self.cache_text_embeddings()
+                # 分布式同步点5：text embeddings缓存完成 - by Tsien at 2025-08-19
+                if has_accelerator:
+                    logger.info(f"🔄 [DISTRIBUTED] rank {current_rank} - 文本嵌入缓存完成，等待同步...")
+                    self.sd.accelerator.wait_for_everyone()
+                    logger.info(f"✅ [DISTRIBUTED] rank {current_rank} - 文本嵌入缓存同步完成")
 
             if self.is_generating_controls:
                 logger.info(f"🔍 [SETUP_EPOCH] 设置控制")
                 self.setup_controls()
+                # 分布式同步点6：controls设置完成 - by Tsien at 2025-08-19
+                if has_accelerator:
+                    logger.info(f"🔄 [DISTRIBUTED] rank {current_rank} - controls设置完成，等待同步...")
+                    self.sd.accelerator.wait_for_everyone()
+                    logger.info(f"✅ [DISTRIBUTED] rank {current_rank} - controls设置同步完成")
         else:
             logger.info(f"🔍 [SETUP_EPOCH] 非初始化 epoch (epoch_num={self.epoch_num})")
             if self.dataset_config.poi is not None:
                 logger.info(f"🔍 [SETUP_EPOCH] 重新设置 buckets (POI 模式)")
                 self.setup_buckets(quiet=True)
+                # 分布式同步点：POI buckets重设完成 - by Tsien at 2025-08-19
+                if has_accelerator:
+                    logger.info(f"🔄 [DISTRIBUTED] rank {current_rank} - POI buckets重设完成，等待同步...")
+                    self.sd.accelerator.wait_for_everyone()
+                    logger.info(f"✅ [DISTRIBUTED] rank {current_rank} - POI buckets重设同步完成")
+
+        # 最终同步点：整个setup_epoch完成 - by Tsien at 2025-08-19
+        if has_accelerator:
+            logger.info(f"🔄 [DISTRIBUTED] rank {current_rank} - setup_epoch即将完成，最终同步...")
+            self.sd.accelerator.wait_for_everyone()
+            logger.info(f"🎉 [DISTRIBUTED] rank {current_rank} - setup_epoch最终同步完成！")
 
         self.epoch_num += 1
         logger.info(f"🔍 [SETUP_EPOCH] setup_epoch 完成，新的 epoch_num: {self.epoch_num}")
@@ -760,8 +808,16 @@ def get_dataloader_from_datasets(
     if is_native_windows():
         dataloader_kwargs['num_workers'] = 0
     else:
-        dataloader_kwargs['num_workers'] = dataset_config_list[0].num_workers
-        dataloader_kwargs['prefetch_factor'] = dataset_config_list[0].prefetch_factor
+        # 分布式训练时强制使用 num_workers=0 避免卡死 - by Tsien at 2025-01-27
+        if is_distributed_training:
+            dataloader_kwargs['num_workers'] = 0
+            dataloader_kwargs['prefetch_factor'] = 1
+            logger.info(f"🔧 [DISTRIBUTED] 强制设置 num_workers=0, prefetch_factor=1 避免 DataLoader 卡死")
+            # del dataloader_kwargs['num_workers']
+            del dataloader_kwargs['prefetch_factor']
+        else:
+            dataloader_kwargs['num_workers'] = dataset_config_list[0].num_workers
+            dataloader_kwargs['prefetch_factor'] = dataset_config_list[0].prefetch_factor
 
     if has_buckets:
         # make sure they all have buckets

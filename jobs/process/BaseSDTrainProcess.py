@@ -359,11 +359,90 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         # let adapter know we are sampling
         if self.adapter is not None and isinstance(self.adapter, CustomAdapter):
+            print_acc("[DEBUG] 设置适配器为采样模式...")
             self.adapter.is_sampling = True
 
         # send to be generated
+        print_acc(f"[DEBUG] 开始生成 {len(gen_img_config_list)} 张样本图像...")
         self.sd.generate_images(gen_img_config_list, sampler=sample_config.sampler)
+        print_acc("[DEBUG] 图像生成完成")
 
+        # 记录生成的样本图像到 TensorBoard - by Tsien at 2025-01-27
+        if self.writer is not None and hasattr(self.logging_config, 'log_samples_to_tensorboard'):
+            try:
+                print_acc("[DEBUG] 开始处理 TensorBoard 图像记录...")
+                from toolkit.image_logging_utils import log_sample_images, should_log_samples
+
+                                                # 检查是否应该记录样本（配置开关）
+                log_samples = getattr(self.logging_config, 'log_samples_to_tensorboard', False)
+                if log_samples and gen_img_config_list:
+                    print_acc(f"[DEBUG] 正在记录 {len(gen_img_config_list)} 张样本到 TensorBoard...")
+                    # 收集生成的图像和控制图像
+                    generated_images = []
+                    control_images = []
+                    prompts = []
+
+                    for i, gen_config in enumerate(gen_img_config_list):
+                        try:
+                            # 尝试从已保存的图像路径加载生成图像
+                            image_path = gen_config.get_image_path(i, len(gen_img_config_list))
+                            print_acc(f"[DEBUG] 检查样本图像路径 {i}: {image_path}")
+
+                            if os.path.exists(image_path):
+                                from PIL import Image
+                                gen_img = Image.open(image_path)
+                                generated_images.append(gen_img)
+                                prompts.append(gen_config.prompt)
+                                print_acc(f"[DEBUG] 成功加载样本图像 {i}: {image_path}")
+
+                                # 收集对应的控制图像（如果有）
+                                if hasattr(gen_config, 'ctrl_img') and gen_config.ctrl_img:
+                                    try:
+                                        print_acc(f"[DEBUG] 检查控制图像路径 {i}: {gen_config.ctrl_img}")
+                                        if os.path.exists(gen_config.ctrl_img):
+                                            ctrl_img = Image.open(gen_config.ctrl_img)
+                                            control_images.append(ctrl_img)
+                                            print_acc(f"[DEBUG] 成功加载控制图像 {i}: {gen_config.ctrl_img}")
+                                        else:
+                                            print_acc(f"⚠️ [SAMPLE_LOG] 控制图像路径不存在: {gen_config.ctrl_img}")
+                                            # 添加空占位符以保持索引一致
+                                            control_images.append(None)
+                                    except Exception as e:
+                                        print_acc(f"⚠️ [SAMPLE_LOG] 加载控制图像失败: {e}")
+                                        control_images.append(None)
+                                else:
+                                    # 没有控制图像，添加空占位符
+                                    print_acc(f"[DEBUG] 样本 {i} 没有控制图像")
+                                    control_images.append(None)
+                            else:
+                                print_acc(f"⚠️ [SAMPLE_LOG] 样本图像路径不存在: {image_path}")
+                        except Exception as e:
+                            print_acc(f"⚠️ [SAMPLE_LOG] 加载样本图像 {i} 失败: {e}")
+                            continue
+
+                    # 过滤掉空的控制图像
+                    valid_control_images = [img for img in control_images if img is not None]
+                    print_acc(f"[DEBUG] 收集到 {len(generated_images)} 张生成图像，{len(valid_control_images)} 张有效控制图像")
+
+                    # 记录到 TensorBoard
+                    if generated_images:
+                        log_sample_images(
+                            self.writer,
+                            generated_images,
+                            prompts,
+                            step if step is not None else self.step_num,
+                            max_images=getattr(self.logging_config, 'log_samples_count', 8),
+                            control_images=valid_control_images if valid_control_images else None
+                        )
+                        print_acc(f"[DEBUG] 成功记录 {len(generated_images)} 张样本到 TensorBoard")
+                    else:
+                        print_acc("[DEBUG] 没有找到生成的样本图像")
+            except Exception as e:
+                print(f"⚠️ [SAMPLE_LOG] TensorBoard 样本记录失败: {e}")
+        else:
+            print_acc("[DEBUG] 跳过 TensorBoard 图像记录 (未启用或无 writer)")
+
+        print_acc("[DEBUG] 样本记录处理完成")
 
         if self.adapter is not None and isinstance(self.adapter, CustomAdapter):
             self.adapter.is_sampling = False
@@ -2011,7 +2090,37 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if self.datasets is not None:
             logger.info(f"🔍 [TRAIN_PROCESS] 创建主训练数据加载器")
             # 传递 train_config 以支持分布式训练时自动禁用 buckets - by Tsien at 2025-08-18
+            # 关键分布式同步点：数据加载器创建前同步 - by Tsien at 2025-08-19
+        if hasattr(self.sd.accelerator, 'wait_for_everyone'):
+            print_acc(f"🔄 [DISTRIBUTED] 数据加载器创建前同步 - rank {self.sd.accelerator.state.process_index}")
+            self.sd.accelerator.wait_for_everyone()
+            print_acc(f"✅ [DISTRIBUTED] 数据加载器创建前同步完成 - rank {self.sd.accelerator.state.process_index}")
+
+        # 创建数据加载器时增加超时保护 - by Tsien at 2025-01-27
+        try:
+            print_acc(f"🔍 [DATALOADER] 开始创建数据加载器...")
             self.data_loader = get_dataloader_from_datasets(self.datasets, self.train_config.batch_size, self.sd, self.train_config)
+            print_acc(f"✅ [DATALOADER] 数据加载器创建成功")
+
+            # 测试 DataLoader 是否工作正常 - by Tsien at 2025-01-27
+            print_acc(f"🧪 [DATALOADER] 测试数据加载器...")
+            try:
+                test_iter = iter(self.data_loader)
+                test_batch = next(test_iter)
+                print_acc(f"✅ [DATALOADER] 测试成功，首批数据加载正常")
+                del test_iter, test_batch  # 释放内存
+            except Exception as e:
+                print_acc(f"⚠️ [DATALOADER] 测试警告，但继续训练: {e}")
+
+        except Exception as e:
+            print_acc(f"❌ [DATALOADER] 数据加载器创建失败: {e}")
+            raise
+
+        # 关键分布式同步点：数据加载器创建后同步 - by Tsien at 2025-08-19
+        if hasattr(self.sd.accelerator, 'wait_for_everyone'):
+            print_acc(f"🔄 [DISTRIBUTED] 数据加载器创建后同步 - rank {self.sd.accelerator.state.process_index}")
+            self.sd.accelerator.wait_for_everyone()
+            print_acc(f"🎉 [DISTRIBUTED] 数据加载器创建后同步完成 - rank {self.sd.accelerator.state.process_index}")
             if self.data_loader:
                 logger.info(f"🔍 [TRAIN_PROCESS] - 主数据加载器创建成功，长度: {len(self.data_loader)}")
                 logger.info(f"🔍 [TRAIN_PROCESS] - 数据集总大小: {len(self.data_loader.dataset)}")
@@ -2137,6 +2246,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 is_sample_step = self.sample_config.sample_every and self.step_num % self.sample_config.sample_every == 0
                 if self.train_config.disable_sampling:
                     is_sample_step = False
+
+                # 在关键步骤前打印调试信息
+                if is_sample_step:
+                    print_acc(f"\n⚠️  [即将采样] 第 {self.step_num} 步 - 即将触发采样操作 (每 {self.sample_config.sample_every} 步采样一次)")
+                if is_save_step:
+                    print_acc(f"\n⚠️  [即将保存] 第 {self.step_num} 步 - 即将触发保存操作 (每 {self.save_config.save_every} 步保存一次)")
 
                 batch_list = []
 
@@ -2264,31 +2379,115 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 # don't do on first step
                 if self.step_num != self.start_step:
                     if is_sample_step or is_save_step:
-                        self.accelerator.wait_for_everyone()
+                        print_acc(f"\n[DEBUG] 第 {self.step_num} 步 - 等待所有进程同步...")
+                        print_acc(f"[DEBUG] 当前进程rank: {self.accelerator.state.process_index}/{self.accelerator.state.num_processes}")
+
+                        # 带超时的同步机制 - by Tsien at 2025-08-19
+                        try:
+                            import signal
+                            import time
+
+                            def timeout_handler(signum, frame):
+                                raise TimeoutError("分布式同步超时")
+
+                            # 设置30秒超时
+                            signal.signal(signal.SIGALRM, timeout_handler)
+                            signal.alarm(30)
+
+                            start_time = time.time()
+                            self.accelerator.wait_for_everyone()
+                            signal.alarm(0)  # 取消超时
+
+                            sync_time = time.time() - start_time
+                            print_acc(f"[DEBUG] 所有进程同步完成 (耗时: {sync_time:.2f}秒)")
+
+                        except TimeoutError:
+                            print_acc(f"❌ [错误] 分布式同步超时！可能某个进程卡住了")
+                            print_acc(f"💡 [建议] 检查其他进程的状态，或者重启训练")
+                            # 继续执行，不要完全停止
+                            signal.alarm(0)
+                        except Exception as e:
+                            print_acc(f"❌ [错误] 同步过程中出现异常: {e}")
+                            signal.alarm(0)
                     if is_sample_step:
+                        print_acc(f"\n🎨 [采样步骤] 开始在第 {self.step_num} 步进行采样...")
                         if self.progress_bar is not None:
                             self.progress_bar.pause()
                         flush()
                         # print above the progress bar
                         if self.train_config.free_u:
+                            print_acc("[DEBUG] 禁用 FreeU...")
                             self.sd.pipeline.disable_freeu()
+                        print_acc("[DEBUG] 开始生成样本图像...")
                         self.sample(self.step_num)
+                        print_acc("[DEBUG] 样本图像生成完成")
                         if self.train_config.unload_text_encoder:
+                            print_acc("[DEBUG] 卸载文本编码器到 CPU...")
                             # make sure the text encoder is unloaded
                             self.sd.text_encoder_to('cpu')
                         flush()
+                        print_acc("[DEBUG] 采样完成，等待所有进程同步...")
+                        # 采样完成后同步所有进程，防止NCCL超时 - by Tsien at 2025-08-18
+                        try:
+                            import signal
+                            import time
+
+                            def timeout_handler(signum, frame):
+                                raise TimeoutError("采样后同步超时")
+
+                            signal.signal(signal.SIGALRM, timeout_handler)
+                            signal.alarm(60)  # 采样后给更长超时时间
+
+                            start_time = time.time()
+                            self.accelerator.wait_for_everyone()
+                            signal.alarm(0)
+
+                            sync_time = time.time() - start_time
+                            print_acc(f"✅ [采样完成] 第 {self.step_num} 步采样完成 (同步耗时: {sync_time:.2f}秒)")
+
+                        except TimeoutError:
+                            print_acc(f"⚠️ [警告] 采样后同步超时，跳过同步继续训练")
+                            signal.alarm(0)
+                        except Exception as e:
+                            print_acc(f"❌ [错误] 采样后同步异常: {e}")
+                            signal.alarm(0)
 
                         self.ensure_params_requires_grad()
                         if self.progress_bar is not None:
                             self.progress_bar.unpause()
 
                     if is_save_step:
-                        self.accelerator
+                        print_acc(f"\n💾 [保存步骤] 开始在第 {self.step_num} 步保存检查点...")
                         # print above the progress bar
                         if self.progress_bar is not None:
                             self.progress_bar.pause()
                         print_acc(f"\nSaving at step {self.step_num}")
                         self.save(self.step_num)
+                        print_acc("[DEBUG] 保存完成，等待所有进程同步...")
+                        # 保存完成后同步所有进程，防止NCCL超时 - by Tsien at 2025-08-18
+                        try:
+                            import signal
+                            import time
+
+                            def timeout_handler(signum, frame):
+                                raise TimeoutError("保存后同步超时")
+
+                            signal.signal(signal.SIGALRM, timeout_handler)
+                            signal.alarm(45)  # 保存后45秒超时
+
+                            start_time = time.time()
+                            self.accelerator.wait_for_everyone()
+                            signal.alarm(0)
+
+                            sync_time = time.time() - start_time
+                            print_acc(f"✅ [保存完成] 第 {self.step_num} 步检查点保存完成 (同步耗时: {sync_time:.2f}秒)")
+
+                        except TimeoutError:
+                            print_acc(f"⚠️ [警告] 保存后同步超时，跳过同步继续训练")
+                            signal.alarm(0)
+                        except Exception as e:
+                            print_acc(f"❌ [错误] 保存后同步异常: {e}")
+                            signal.alarm(0)
                         self.ensure_params_requires_grad()
                         # clear any grads
                         optimizer.zero_grad()

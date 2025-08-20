@@ -42,6 +42,10 @@ class LoggingConfig:
         self.log_images_every: int = kwargs.get('log_images_every', 500)  # 每隔多少步记录图像
         self.log_images_count: int = kwargs.get('log_images_count', 8)  # 每次记录多少对图像
 
+        # TensorBoard 样本图像记录配置 - by Tsien at 2025-01-27
+        self.log_samples_to_tensorboard: bool = kwargs.get('log_samples_to_tensorboard', False)  # 是否记录生成的样本图像
+        self.log_samples_count: int = kwargs.get('log_samples_count', 8)  # 每次记录多少张样本图像
+
 class SampleItem:
     def __init__(
         self,
