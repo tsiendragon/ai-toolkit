@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FLUX Kontext LoRA Demo</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <!-- 标题栏 -->
+        <header class="header">
+            <h1><i class="fas fa-robot"></i> FLUX Kontext LoRA Demo</h1>
+            <p>FLUX Kontext Dev模型的LoRA checkpoint加载和推理演示</p>
+        </header>
+
+        <!-- 模型状态和控制面板 -->
+        <section class="model-control">
+            <div class="model-status">
+                <h3><i class="fas fa-info-circle"></i> 模型状态</h3>
+                <div class="status-grid">
+                    <div class="status-item">
+                        <span class="status-label">加载状态:</span>
+                        <span id="model-status" class="status-value status-unloaded">未加载</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">当前LoRA:</span>
+                        <span id="current-lora" class="status-value">无</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">设备:</span>
+                        <span id="device-info" class="status-value">-</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">显存使用:</span>
+                        <span id="memory-info" class="status-value">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="model-controls">
+                <h3><i class="fas fa-cogs"></i> 模型控制</h3>
+                <div class="control-group">
+                    <label for="lora-path">LoRA Checkpoint路径:</label>
+                    <input type="text" id="lora-path"
+                           value="/data/lilong/experiment/id_card_flux_kontext_lora_v1/id_card_flux_kontext_lora_v1/id_card_flux_kontext_lora_v1_000001111.safetensors"
+                           placeholder="输入LoRA checkpoint文件路径">
+                </div>
+                <div class="button-group">
+                    <button id="load-model-btn" class="btn btn-primary">
+                        <i class="fas fa-download"></i> 加载模型
+                    </button>
+                    <button id="unload-model-btn" class="btn btn-secondary" disabled>
+                        <i class="fas fa-trash"></i> 卸载模型
+                    </button>
+                    <button id="refresh-status-btn" class="btn btn-info">
+                        <i class="fas fa-sync"></i> 刷新状态
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- 主要功能区域 -->
+        <main class="main-content">
+            <!-- 批量推理 -->
+            <section class="inference-section">
+                <h2><i class="fas fa-images"></i> 批量推理</h2>
+                <div class="card">
+                    <form id="batch-form">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="batch-folder">图像文件夹路径:</label>
+                                <input type="text" id="batch-folder"
+                                       value="/home/sysop/data/id_card/training_images"
+                                       placeholder="输入图像文件夹路径">
+                            </div>
+                            <div class="form-group">
+                                <label for="max-samples">最大采样数量:</label>
+                                <input type="number" id="max-samples" value="5" min="1" max="20">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="batch-seed">随机种子:</label>
+                                <input type="number" id="batch-seed" value="42">
+                            </div>
+                            <div class="form-group">
+                                <label for="batch-guidance">引导强度:</label>
+                                <input type="number" id="batch-guidance" value="4.0" min="1.0" max="20.0" step="0.1">
+                            </div>
+                            <div class="form-group">
+                                <label for="batch-steps">推理步数:</label>
+                                <input type="number" id="batch-steps" value="20" min="10" max="50">
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-large">
+                            <i class="fas fa-play"></i> 开始批量推理
+                        </button>
+                    </form>
+                </div>
+
+                <!-- 批量推理结果 -->
+                <div id="batch-results" class="results-section" style="display: none;">
+                    <h3>批量推理结果</h3>
+                    <div id="batch-gallery" class="image-gallery"></div>
+                </div>
+            </section>
+
+            <!-- 单个推理 -->
+            <section class="inference-section">
+                <h2><i class="fas fa-image"></i> 单个推理</h2>
+                <div class="card">
+                    <form id="single-form">
+                        <div class="form-group">
+                            <label for="prompt">文本提示:</label>
+                            <textarea id="prompt" rows="4"
+                                      placeholder="输入生成图像的文本描述..."></textarea>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="control-image">控制图像 (可选):</label>
+                            <div class="upload-area">
+                                <input type="file" id="control-image" accept="image/*" style="display: none;">
+                                <div class="upload-placeholder" onclick="document.getElementById('control-image').click();">
+                                    <i class="fas fa-cloud-upload-alt"></i>
+                                    <span>点击上传控制图像</span>
+                                </div>
+                                <div id="upload-preview" style="display: none;"></div>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="single-width">宽度:</label>
+                                <input type="number" id="single-width" value="832" min="512" max="1024" step="64">
+                            </div>
+                            <div class="form-group">
+                                <label for="single-height">高度:</label>
+                                <input type="number" id="single-height" value="576" min="512" max="1024" step="64">
+                            </div>
+                            <div class="form-group">
+                                <label for="single-seed">随机种子:</label>
+                                <input type="number" id="single-seed" value="42">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="single-guidance">引导强度:</label>
+                                <input type="number" id="single-guidance" value="4.0" min="1.0" max="20.0" step="0.1">
+                            </div>
+                            <div class="form-group">
+                                <label for="single-steps">推理步数:</label>
+                                <input type="number" id="single-steps" value="20" min="10" max="50">
+                            </div>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-large">
+                            <i class="fas fa-magic"></i> 开始单个推理
+                        </button>
+                    </form>
+                </div>
+
+                <!-- 单个推理结果 -->
+                <div id="single-results" class="results-section" style="display: none;">
+                    <h3>推理结果</h3>
+                    <div id="single-result-image" class="single-result"></div>
+                </div>
+            </section>
+        </main>
+
+        <!-- 日志输出区域 -->
+        <section class="log-section">
+            <h3><i class="fas fa-terminal"></i> 系统日志</h3>
+            <div id="log-container" class="log-container">
+                <div class="log-entry">
+                    <span class="log-time">[启动]</span>
+                    <span class="log-message">FLUX Kontext LoRA Demo 已启动</span>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <!-- 加载指示器 -->
+    <div id="loading-overlay" class="loading-overlay" style="display: none;">
+        <div class="loading-spinner">
+            <i class="fas fa-spinner fa-spin"></i>
+            <span id="loading-text">加载中...</span>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

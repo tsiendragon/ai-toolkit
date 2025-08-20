@@ -1,0 +1,36 @@
+# FLUX Kontext LoRA Demo 依赖包
+
+# FastAPI 和 Web 服务
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+jinja2==3.1.2
+
+# HTTP 客户端和 CORS
+httpx==0.25.2
+
+# 基础依赖 (与主项目保持一致)
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+transformers>=4.35.0
+diffusers>=0.24.0
+accelerate>=0.24.0
+safetensors>=0.4.0
+peft>=0.6.0
+
+# 图像处理
+Pillow>=10.0.0
+opencv-python>=4.8.0
+
+# 数据科学和工具
+numpy>=1.24.0
+pydantic>=2.4.0
+tqdm>=4.66.0
+
+# 可选：Gradio 替代方案（如果需要）
+# gradio>=3.50.0
+
+# 开发工具（可选）
+# black>=23.0.0
+# flake8>=6.0.0
