@@ -160,6 +160,73 @@ def get_memory_info():
     return None
 
 
+def perform_flux_kontext_inference(
+    model: FluxKontextModel,
+    prompt: str,
+    control_image_path: str,
+    output_path: Path,
+    width: int = 832,
+    height: int = 576,
+    num_inference_steps: int = 20,
+    guidance_scale: float = 4.0,
+    seed: int = 42
+) -> bool:
+    """执行FluxKontext推理生成图像"""
+    try:
+        print(f"🎨 开始FluxKontext推理...")
+        print(f"📝 提示: {prompt[:100]}...")
+        print(f"🖼️ 控制图像: {control_image_path}")
+        print(f"📏 尺寸: {width}x{height}")
+
+        # 创建生成配置
+        gen_config = GenerateImageConfig(
+            prompt=prompt,
+            width=width,
+            height=height,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            seed=seed,
+            ctrl_img=control_image_path,
+            output_path=str(output_path)
+        )
+
+        # 设置随机数生成器
+        generator = torch.Generator(device=model.device)
+        generator.manual_seed(seed)
+
+        # 编码提示词
+        print("📝 编码提示词...")
+        conditional_embeds = model.get_prompt_embeds(prompt)
+
+        # 获取生成pipeline
+        print("🔧 准备生成pipeline...")
+        pipeline = model.get_generation_pipeline()
+
+        # 生成图像
+        print("🎨 生成图像中...")
+        generated_image = model.generate_single_image(
+            pipeline=pipeline,
+            gen_config=gen_config,
+            conditional_embeds=conditional_embeds,
+            unconditional_embeds=None,  # FluxKontext通常不需要negative prompt
+            generator=generator,
+            extra={}
+        )
+
+        # 保存图像
+        print(f"💾 保存图像到: {output_path}")
+        generated_image.save(output_path, "JPEG", quality=95)
+
+        print("✅ FluxKontext推理完成!")
+        return True
+
+    except Exception as e:
+        print(f"❌ FluxKontext推理失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """主页面"""
@@ -311,19 +378,79 @@ async def batch_inference(request: BatchInferenceRequest):
             if txt_path.exists():
                 prompt = txt_path.read_text(encoding='utf-8').strip()
 
-            # TODO: 这里应该调用实际的推理逻辑
             # 生成输出文件名
             output_filename = f"batch_{request.seed}_{i:04d}.jpg"
             output_path = SAMPLES_OUTPUT_DIR / output_filename
 
-            # 暂时返回模拟结果 - 实际实现时这里会调用模型推理
-            results.append({
-                "original_image": str(img_path),
-                "prompt": prompt,
-                "generated_image": f"/samples/{output_filename}",
-                "output_path": str(output_path),
-                "success": True
-            })
+            # 使用真正的FluxKontext推理
+            try:
+                # 如果提示词为空，使用默认提示
+                if not prompt.strip():
+                    prompt = f"high quality, detailed image based on the input, seed {request.seed}"
+
+                # 使用FluxKontext进行推理
+                inference_success = perform_flux_kontext_inference(
+                    model=app_state.model,
+                    prompt=prompt,
+                    control_image_path=str(img_path),
+                    output_path=output_path,
+                    width=832,  # FluxKontext常用尺寸
+                    height=576,
+                    num_inference_steps=request.num_inference_steps,
+                    guidance_scale=request.guidance_scale,
+                    seed=request.seed + i  # 为每张图像使用不同的种子
+                )
+
+                results.append({
+                    "original_image": str(img_path),
+                    "prompt": prompt,
+                    "generated_image": f"/samples/{output_filename}",
+                    "output_path": str(output_path),
+                    "success": inference_success
+                })
+
+            except Exception as img_error:
+                print(f"⚠️ 推理失败，创建占位符图像: {img_error}")
+                # 如果推理失败，创建占位符图像
+                try:
+                    original_img = Image.open(img_path)
+                    from PIL import ImageDraw, ImageFont
+                    placeholder_img = original_img.copy()
+                    placeholder_img = placeholder_img.resize((832, 576))
+
+                    draw = ImageDraw.Draw(placeholder_img)
+                    try:
+                        font = ImageFont.load_default()
+                    except:
+                        font = None
+
+                    error_text = f"推理失败 #{i+1}"
+                    if font:
+                        draw.text((10, 10), error_text, fill="red", font=font)
+                        draw.text((10, 30), f"错误: {str(img_error)[:50]}", fill="red", font=font)
+                    else:
+                        draw.text((10, 10), error_text, fill="red")
+
+                    placeholder_img.save(output_path, "JPEG", quality=85)
+
+                    results.append({
+                        "original_image": str(img_path),
+                        "prompt": prompt,
+                        "generated_image": f"/samples/{output_filename}",
+                        "output_path": str(output_path),
+                        "success": False,
+                        "error": str(img_error)
+                    })
+                except Exception as fallback_error:
+                    print(f"⚠️ 占位符创建也失败: {fallback_error}")
+                    results.append({
+                        "original_image": str(img_path),
+                        "prompt": prompt,
+                        "generated_image": f"/samples/{output_filename}",
+                        "output_path": str(output_path),
+                        "success": False,
+                        "error": f"推理和占位符都失败: {str(img_error)}"
+                    })
 
         return {
             "success": True,
@@ -345,7 +472,6 @@ async def single_inference(request: SingleInferenceRequest):
     try:
         print(f"🎨 开始单个推理: {request.prompt[:50]}...")
 
-        # TODO: 这里应该调用实际的推理逻辑
         # 生成输出文件名
         import time
         timestamp = int(time.time())
@@ -353,19 +479,105 @@ async def single_inference(request: SingleInferenceRequest):
         output_path = SAMPLES_OUTPUT_DIR / output_filename
         output_url = f"/samples/{output_filename}"
 
-        return {
-            "success": True,
-            "message": "推理完成",
-            "generated_image": output_url,
-            "prompt": request.prompt,
-            "parameters": {
-                "width": request.width,
-                "height": request.height,
-                "guidance_scale": request.guidance_scale,
-                "num_inference_steps": request.num_inference_steps,
-                "seed": request.seed
+        # 验证和处理控制图像路径
+        control_image_path = None
+        if request.control_image_path:
+            # 处理不同的路径格式
+            if request.control_image_path.startswith("/samples/uploads/"):
+                # 从API路径转换为本地绝对路径
+                filename = request.control_image_path.split("/")[-1]
+                control_image_path = str(SAMPLES_OUTPUT_DIR / "uploads" / filename)
+            else:
+                # 直接使用提供的路径
+                control_image_path = request.control_image_path
+
+            # 验证文件是否存在
+            if not os.path.exists(control_image_path):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"控制图像文件不存在: {control_image_path}"
+                )
+        else:
+            # FluxKontext需要控制图像，如果没有提供则抛出错误
+            raise HTTPException(
+                status_code=400,
+                detail="FluxKontext模型需要控制图像。请上传一张控制图像。"
+            )
+
+        # 使用真正的FluxKontext推理
+        try:
+            # 执行推理
+            inference_success = perform_flux_kontext_inference(
+                model=app_state.model,
+                prompt=request.prompt,
+                control_image_path=control_image_path,
+                output_path=output_path,
+                width=request.width,
+                height=request.height,
+                num_inference_steps=request.num_inference_steps,
+                guidance_scale=request.guidance_scale,
+                seed=request.seed
+            )
+
+            if not inference_success:
+                raise HTTPException(status_code=500, detail="FluxKontext推理失败")
+
+            return {
+                "success": True,
+                "message": "FluxKontext推理完成",
+                "generated_image": output_url,
+                "prompt": request.prompt,
+                "control_image": control_image_path,
+                "parameters": {
+                    "width": request.width,
+                    "height": request.height,
+                    "guidance_scale": request.guidance_scale,
+                    "num_inference_steps": request.num_inference_steps,
+                    "seed": request.seed
+                }
             }
-        }
+
+        except HTTPException:
+            # 重新抛出HTTP异常
+            raise
+        except Exception as img_error:
+            print(f"⚠️ FluxKontext推理失败: {img_error}")
+            import traceback
+            traceback.print_exc()
+
+            # 创建错误提示图像
+            try:
+                from PIL import ImageDraw, ImageFont
+
+                error_img = Image.new('RGB', (request.width, request.height), color='lightgray')
+                draw = ImageDraw.Draw(error_img)
+
+                try:
+                    font = ImageFont.load_default()
+                except:
+                    font = None
+
+                error_text = f"推理失败: {str(img_error)[:100]}"
+                if font:
+                    draw.text((10, 10), "FluxKontext推理失败", fill="red", font=font)
+                    draw.text((10, 30), error_text, fill="red", font=font)
+                else:
+                    draw.text((10, 10), "FluxKontext推理失败", fill="red")
+                    draw.text((10, 30), error_text, fill="red")
+
+                error_img.save(output_path, "JPEG", quality=85)
+
+                return {
+                    "success": False,
+                    "message": f"推理失败: {str(img_error)}",
+                    "generated_image": output_url,
+                    "prompt": request.prompt,
+                    "error": str(img_error)
+                }
+
+            except Exception as fallback_error:
+                print(f"⚠️ 错误图像创建失败: {fallback_error}")
+                raise HTTPException(status_code=500, detail=f"推理失败且无法创建错误图像: {str(img_error)}")
 
     except Exception as e:
         print(f"❌ 单个推理失败: {str(e)}")
@@ -399,7 +611,8 @@ async def upload_image(file: UploadFile = File(...)):
             "success": True,
             "message": "图像上传成功",
             "file_path": f"/samples/uploads/{filename}",
-            "local_path": str(file_path)
+            "local_path": str(file_path),
+            "absolute_path": str(file_path.absolute())  # 用于推理的绝对路径
         }
 
     except Exception as e:

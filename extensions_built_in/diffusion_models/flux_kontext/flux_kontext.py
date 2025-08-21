@@ -62,6 +62,11 @@ class FluxKontextModel(BaseModel):
         self.is_transformer = True
         self.target_lora_modules = ['FluxTransformer2DModel']
 
+    @property
+    def is_flux(self):
+        """FluxKontextModel 应该被识别为 Flux 模型以支持 LoRA 加载"""
+        return self.arch == 'flux_kontext' or self.arch == 'flux'
+
     # static method to get the noise scheduler
     @staticmethod
     def get_train_scheduler():

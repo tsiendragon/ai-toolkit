@@ -300,16 +300,28 @@ class FluxDemo {
         results.forEach((result, index) => {
             const item = document.createElement('div');
             item.className = 'gallery-item';
+            // 为提示文本创建唯一ID
+            const promptId = `prompt-${index}`;
+
             item.innerHTML = `
-                <img src="${result.generated_image}" alt="生成图像 ${index + 1}" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMzAwIiBoZWlnaHQ9IjIwMCIgZmlsbD0iI2VjZjBmMSIvPjx0ZXh0IHg9IjE1MCIgeT0iMTAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTQiIGZpbGw9IiM3ZjhjOGQiPuWbvuWDj+eUn+aIkOS4re4uLi48L3RleHQ+PC9zdmc+'">
+                <img src="${result.generated_image}" alt="生成图像 ${index + 1}"
+                     onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAwIiBoZWlnaHQ9IjMwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iNDAwIiBoZWlnaHQ9IjMwMCIgZmlsbD0iI2VjZjBmMSIvPjx0ZXh0IHg9IjIwMCIgeT0iMTUwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTYiIGZpbGw9IiM3ZjhjOGQiPuWbvuWDj+eUn+aIkOS4re4uLi48L3RleHQ+PC9zdmc+'"
+                     onclick="demo.openImageModal('${result.generated_image}')">
                 <div class="gallery-item-info">
-                    <h4>图像 ${index + 1}</h4>
+                    <h4>图像 ${index + 1} ${result.success ? '✅' : '❌'}</h4>
                     <p><strong>原图:</strong> ${result.original_image.split('/').pop()}</p>
-                    <p><strong>提示:</strong> ${result.prompt.substring(0, 100)}${result.prompt.length > 100 ? '...' : ''}</p>
+                    <p><strong>提示:</strong></p>
+                    <div class="prompt-text" id="${promptId}" onclick="demo.togglePrompt('${promptId}')" title="点击展开/收缩完整提示">
+                        ${result.prompt || '无提示文本'}
+                    </div>
+                    ${result.error ? `<p style="color: #e74c3c; font-size: 0.8rem; margin-top: 5px;"><strong>错误:</strong> ${result.error}</p>` : ''}
                 </div>
             `;
             gallery.appendChild(item);
         });
+
+        // 确保图像模态框存在
+        this.ensureImageModal();
     }
 
     displaySingleResult(result) {
@@ -385,6 +397,71 @@ class FluxDemo {
         const entries = logContainer.querySelectorAll('.log-entry');
         if (entries.length > 100) {
             entries[0].remove();
+        }
+    }
+
+    // 提示文本展开/收缩功能
+    togglePrompt(promptId) {
+        const promptElement = document.getElementById(promptId);
+        if (promptElement) {
+            promptElement.classList.toggle('expanded');
+        }
+    }
+
+    // 图像模态框功能
+    openImageModal(imageSrc) {
+        const modal = document.getElementById('image-modal');
+        const modalImg = document.getElementById('modal-image');
+
+        if (!modal) {
+            this.ensureImageModal();
+            return this.openImageModal(imageSrc); // 递归调用确保模态框创建完成
+        }
+
+        modal.style.display = 'block';
+        modalImg.src = imageSrc;
+
+        // 添加键盘ESC关闭功能
+        document.addEventListener('keydown', this.handleModalKeydown);
+    }
+
+    closeImageModal() {
+        const modal = document.getElementById('image-modal');
+        if (modal) {
+            modal.style.display = 'none';
+        }
+
+        // 移除键盘事件监听器
+        document.removeEventListener('keydown', this.handleModalKeydown);
+    }
+
+    handleModalKeydown = (e) => {
+        if (e.key === 'Escape') {
+            this.closeImageModal();
+        }
+    }
+
+    ensureImageModal() {
+        // 检查是否已存在图像模态框
+        if (!document.getElementById('image-modal')) {
+            const modal = document.createElement('div');
+            modal.id = 'image-modal';
+            modal.className = 'image-modal';
+            modal.innerHTML = `
+                <div class="image-modal-content">
+                    <span class="modal-close" onclick="demo.closeImageModal()">&times;</span>
+                    <img id="modal-image" src="" alt="放大图像">
+                </div>
+            `;
+
+            // 点击模态框背景关闭
+            modal.onclick = (e) => {
+                if (e.target === modal) {
+                    this.closeImageModal();
+                }
+            };
+
+            document.body.appendChild(modal);
         }
     }
 
